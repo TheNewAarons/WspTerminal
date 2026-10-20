@@ -104,3 +104,14 @@ def test_open_read_schema_too_new(conn: sqlite3.Connection, db_path: Path) -> No
 
 def test_secure_delete_on(conn: sqlite3.Connection) -> None:
     assert conn.execute("PRAGMA secure_delete").fetchone()[0] == 1
+
+
+def test_transaction_rollback_guard_keeps_original_error(conn: sqlite3.Connection) -> None:
+    with pytest.raises(ValueError, match="original"), db.transaction(conn):
+        conn.execute("ROLLBACK")
+        raise ValueError("original")
+    assert not conn.in_transaction
+    conn.execute("BEGIN")
+    with pytest.raises(ValueError, match="anidado"), db.transaction(conn):
+        conn.execute("ROLLBACK")
+        raise ValueError("anidado")

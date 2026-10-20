@@ -332,18 +332,36 @@ def _row(conn: sqlite3.Connection, wa_id: str = "1") -> sqlite3.Row:
     return r
 
 
-def test_upsert_collision_other_author_not_applied(conn: sqlite3.Connection) -> None:
+def test_upsert_other_author_is_separate_row(conn: sqlite3.Connection) -> None:
     first = repo.upsert_message(conn, MessageIn(CHAT, "1", 1, body="orig", sender_jid="a"))
     res = repo.upsert_message(
-        conn, MessageIn(CHAT, "1", 2, body="hack", sender_jid="b", status="read")
+        conn, MessageIn(CHAT, "1", 2, body="otro", sender_jid="b", status="read")
     )
-    assert (res.applied, res.inserted, res.id) == (False, False, first.id)
+    assert (res.applied, res.inserted) == (True, True)
+    assert res.id != first.id
     r = _row(conn)
     assert (r["body"], r["sender_jid"], r["status"]) == ("orig", "a", "sent")
-    res2 = repo.upsert_message(conn, MessageIn(CHAT, "1", 2, body="hack", from_me=True))
-    assert res2.applied is False
+    # sender None sobre dos filas del mismo wa_id es ambiguo: no toca nada.
+    amb = repo.upsert_message(conn, MessageIn(CHAT, "1", 3, body="x", from_me=True))
+    assert amb.applied is False
+    assert _count(conn, "messages") == 2
+
+
+def test_upsert_from_me_mismatch_not_applied(conn: sqlite3.Connection) -> None:
+    first = repo.upsert_message(conn, MessageIn(CHAT, "1", 1, body="orig", sender_jid="a"))
+    res = repo.upsert_message(conn, MessageIn(CHAT, "1", 2, body="hack", from_me=True))
+    assert (res.applied, res.inserted, res.id) == (False, False, first.id)
     assert _row(conn)["body"] == "orig"
     assert _count(conn, "messages") == 1
+
+
+def test_null_sender_duplicate_does_not_insert_twice(conn: sqlite3.Connection) -> None:
+    repo.upsert_message(conn, MessageIn(CHAT, "1", 1, body="a", from_me=True))
+    res = repo.upsert_message(conn, MessageIn(CHAT, "1", 1, body="a", from_me=True))
+    assert res.inserted is False
+    assert _count(conn, "messages") == 1
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("INSERT INTO messages (chat_jid, wa_id, ts) VALUES (?, '1', 5)", (CHAT,))
 
 
 def test_edit_delete_wrong_author_not_applied(conn: sqlite3.Connection) -> None:
@@ -444,7 +462,7 @@ def test_outbox_done_clears_payload_keeps_row(conn: sqlite3.Connection) -> None:
     assert _count(conn, "outbox") == 1
 
 
-def test_purge_stuck_sending(conn: sqlite3.Connection) -> None:
+def test_purge_stuck_sending_marks_failed(conn: sqlite3.Connection) -> None:
     now = 10 * DAY
     stuck = now - repo.STUCK_SENDING_SECONDS - 1
     repo.outbox_put(conn, "stuck", CHAT, {"a": 1}, created_at=stuck)
@@ -452,9 +470,118 @@ def test_purge_stuck_sending(conn: sqlite3.Connection) -> None:
     assert repo.outbox_next(conn) is not None
     assert repo.outbox_next(conn) is not None
     res = repo.purge_older_than(conn, 365, now=now)
-    assert res.outbox == 1
-    left = {r[0] for r in conn.execute("SELECT request_id FROM outbox")}
-    assert left == {"recent"}
+    assert res.outbox == 0
+    states = {
+        r[0]: (r[1], r[2]) for r in conn.execute("SELECT request_id, state, payload FROM outbox")
+    }
+    assert states == {"stuck": ("failed", "{}"), "recent": ("sending", '{"a": 1}')}
+
+
+def test_purge_removes_orphan_chats_and_contacts(conn: sqlite3.Connection) -> None:
+    now = 1_000 * DAY
+    old = now - 400 * DAY
+    other = "5215511111111@s.whatsapp.net"
+    repo.upsert_message(conn, MessageIn(CHAT, "1", old, body="viejo", sender_jid="s"))
+    repo.upsert_message(conn, MessageIn(other, "2", now - 10, body="nuevo", sender_jid="n"))
+    repo.upsert_chat(conn, "pin@s.whatsapp.net", pinned=True)
+    repo.upsert_contact(conn, CHAT, push_name="Juan", updated_at=old)
+    repo.upsert_contact(conn, "s", push_name="Huerfano", updated_at=old)
+    repo.upsert_contact(conn, "n", push_name="Vigente", updated_at=old)
+    repo.upsert_contact(conn, "ali", alias="Mamá", updated_at=old)
+    res = repo.purge_older_than(conn, 365, now=now)
+    assert (res.messages, res.chats) == (1, 1)
+    chats = {r[0] for r in conn.execute("SELECT jid FROM chats")}
+    assert chats == {other, "pin@s.whatsapp.net"}
+    contacts = {r[0] for r in conn.execute("SELECT jid FROM contacts")}
+    assert contacts == {"n", "ali"}
+    assert res.contacts == 2
+
+
+def test_apply_delete_removes_reactions(conn: sqlite3.Connection) -> None:
+    repo.upsert_message(conn, MessageIn(CHAT, "1", 1, body="x", sender_jid="a"))
+    repo.upsert_reaction(conn, CHAT, "1", "b", "👍", 2)
+    assert repo.apply_delete(conn, CHAT, "1", 5, sender_jid="b") is False
+    assert _count(conn, "reactions") == 1
+    assert repo.apply_delete(conn, CHAT, "1", 5, sender_jid="a") is True
+    assert _count(conn, "reactions") == 0
+
+
+def test_outbox_payload_cap_and_failed_clears(conn: sqlite3.Connection) -> None:
+    big = {"text": "x" * (repo.MAX_PAYLOAD_BYTES + 1)}
+    with pytest.raises(ValueError):
+        repo.outbox_put(conn, "big", CHAT, big)
+    assert _count(conn, "outbox") == 0
+    repo.outbox_put(conn, "r1", CHAT, {"text": "secreto"}, created_at=1)
+    repo.outbox_next(conn)
+    assert repo.outbox_fail(conn, "r1", "boom", retry=True) is True
+    item = repo.outbox_get(conn, "r1")
+    assert item is not None and item.payload == {"text": "secreto"} and item.state == "queued"
+    repo.outbox_next(conn)
+    assert repo.outbox_fail(conn, "r1", "boom") is True
+    item = repo.outbox_get(conn, "r1")
+    assert item is not None and (item.state, item.payload) == ("failed", {})
+
+
+def test_outbox_get_done_wa_id_and_recover(conn: sqlite3.Connection) -> None:
+    assert repo.outbox_get(conn, "nope") is None
+    repo.outbox_put(conn, "r1", CHAT, {"text": "a"}, created_at=1)
+    repo.outbox_put(conn, "r2", CHAT, {"text": "b"}, created_at=2)
+    repo.outbox_put(conn, "r3", CHAT, {"text": "c"}, created_at=3)
+    first = repo.outbox_next(conn)
+    assert first is not None and first.wa_id is None
+    assert repo.outbox_done(conn, "r1", "WAID1") is True
+    done = repo.outbox_get(conn, "r1")
+    assert done is not None and (done.state, done.wa_id, done.payload) == ("done", "WAID1", {})
+    assert repo.outbox_next(conn) is not None  # r2 sending
+    assert repo.outbox_recover(conn) == 1
+    rec = repo.outbox_get(conn, "r2")
+    assert rec is not None and (rec.state, rec.error, rec.payload) == ("failed", "interrupted", {})
+    queued = repo.outbox_get(conn, "r3")
+    assert queued is not None and queued.state == "queued"
+    assert repo.outbox_recover(conn) == 0
+
+
+def test_rebind_wa_id_renames(conn: sqlite3.Connection) -> None:
+    repo.upsert_message(
+        conn, MessageIn(CHAT, "tmp", 1, body="hola", from_me=True, status="pending")
+    )
+    assert repo.rebind_wa_id(conn, CHAT, "tmp", "REAL") is True
+    assert repo.rebind_wa_id(conn, CHAT, "tmp", "REAL") is False
+    assert _row(conn, "REAL")["body"] == "hola"
+    assert _count(conn, "messages") == 1
+    assert [m.wa_id for m in repo.search(conn, "hola")] == ["REAL"]
+
+
+def test_rebind_wa_id_merges_with_existing_echo(conn: sqlite3.Connection) -> None:
+    repo.upsert_message(conn, MessageIn(CHAT, "tmp", 1, body="hola", from_me=True, status="sent"))
+    repo.upsert_message(
+        conn, MessageIn(CHAT, "REAL", 1, body="hola", from_me=True, status="delivered")
+    )
+    assert repo.rebind_wa_id(conn, CHAT, "tmp", "REAL") is True
+    assert _count(conn, "messages") == 1
+    assert _status(conn, "REAL") == "delivered"
+    assert len(repo.search(conn, "hola")) == 1
+    # El placeholder más avanzado que el eco eleva el estado.
+    repo.upsert_message(conn, MessageIn(CHAT, "t2", 2, body="b", from_me=True, status="read"))
+    repo.upsert_message(conn, MessageIn(CHAT, "R2", 2, body="b", from_me=True, status="sent"))
+    assert repo.rebind_wa_id(conn, CHAT, "t2", "R2") is True
+    assert _status(conn, "R2") == "read"
+    assert repo.rebind_wa_id(conn, CHAT, "same", "same") is False
+
+
+def test_fts_optimize_runs(conn: sqlite3.Connection) -> None:
+    repo.upsert_message(conn, MessageIn(CHAT, "1", 1, body="manzana", sender_jid="s"))
+    repo.fts_optimize(conn)
+    assert len(repo.search(conn, "manzana")) == 1
+
+
+def test_fts_long_token_does_not_break_search(conn: sqlite3.Connection) -> None:
+    long = "a" * 500
+    repo.upsert_message(conn, MessageIn(CHAT, "1", 1, body=f"x {long}", sender_jid="s"))
+    q = repo.fts_query(f"x {long}")
+    assert all(len(t) <= repo.MAX_FTS_TOKEN_LEN + 3 for t in q.split(" "))
+    assert [m.wa_id for m in repo.search(conn, long)] == ["1"]
+    assert repo.search(conn, "b" * 1000) == []
 
 
 def test_error_redaction(conn: sqlite3.Connection) -> None:

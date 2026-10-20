@@ -113,8 +113,10 @@ def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
         try:
             yield conn
         except BaseException:
-            conn.execute("ROLLBACK TO wsp_nested")
-            conn.execute("RELEASE wsp_nested")
+            # Si el cuerpo ya cerró la transacción, no enmascarar la excepción original.
+            if conn.in_transaction:
+                conn.execute("ROLLBACK TO wsp_nested")
+                conn.execute("RELEASE wsp_nested")
             raise
         conn.execute("RELEASE wsp_nested")
         return
@@ -122,7 +124,8 @@ def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
     try:
         yield conn
     except BaseException:
-        conn.execute("ROLLBACK")
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
         raise
     conn.execute("COMMIT")
 
