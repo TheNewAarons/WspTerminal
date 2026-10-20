@@ -755,13 +755,13 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "keyring", specifier = ">=25" },
+    { name = "keyring", specifier = ">=25,<26" },
     { name = "neonize", specifier = ">=0.5.2,<0.6" },
-    { name = "prompt-toolkit", specifier = ">=3" },
-    { name = "pydantic", specifier = ">=2" },
-    { name = "qrcode" },
-    { name = "rapidfuzz" },
-    { name = "structlog" },
+    { name = "prompt-toolkit", specifier = ">=3,<4" },
+    { name = "pydantic", specifier = ">=2,<3" },
+    { name = "qrcode", specifier = ">=8" },
+    { name = "rapidfuzz", specifier = ">=3,<4" },
+    { name = "structlog", specifier = ">=25" },
 ]
 
 [package.metadata.requires-dev]

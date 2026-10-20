@@ -5,12 +5,12 @@ description = "Cliente de WhatsApp minimalista para la terminal de macOS"
 requires-python = ">=3.12"
 dependencies = [
     "neonize>=0.5.2,<0.6",
-    "pydantic>=2",
-    "prompt_toolkit>=3",
-    "keyring>=25",
-    "structlog",
-    "rapidfuzz",
-    "qrcode",
+    "pydantic>=2,<3",
+    "prompt_toolkit>=3,<4",
+    "keyring>=25,<26",
+    "structlog>=25",
+    "rapidfuzz>=3,<4",
+    "qrcode>=8",
 ]
 
 [project.scripts]
