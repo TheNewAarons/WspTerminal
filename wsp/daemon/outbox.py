@@ -18,7 +18,6 @@ from pydantic import ValidationError
 from wsp.daemon.config import OutboxConfig
 from wsp.daemon.session import WaClient
 from wsp.protocol.models import (
-    ChatUpdated,
     Event,
     HandledCommand,
     History,
@@ -32,8 +31,10 @@ from wsp.protocol.models import (
     SendReply,
     SendText,
 )
+from wsp.protocol.rows import chat_event, message_event, message_in
 from wsp.protocol.server import CommandError
 from wsp.store import db, repo
+from wsp.store.writer import Writer
 
 log = logging.getLogger(__name__)
 
@@ -89,7 +90,7 @@ class Outbox:
 
     def __init__(
         self,
-        conn: sqlite3.Connection,
+        writer: Writer,
         client: WaClient,
         cfg: OutboxConfig,
         emit: Callable[[Event], None],
@@ -98,7 +99,7 @@ class Outbox:
         sleep: Sleep = asyncio.sleep,
         now: Callable[[], int] = lambda: int(time.time()),
     ) -> None:
-        self._conn = conn
+        self._writer = writer
         self._client = client
         self._cfg = cfg
         self._emit = emit
@@ -108,57 +109,81 @@ class Outbox:
         self._wake = asyncio.Event()
         self._stopping = False
         self._task: asyncio.Task[None] | None = None
+        self._inflight: set[asyncio.Task[dict[str, Any]]] = set()
 
     # ---- encolar ------------------------------------------------------------------------
 
-    def enqueue(self, request_id: str, payload: Mapping[str, Any], chat_jid: str) -> dict[str, Any]:
-        """Encola (idempotente por request_id) y devuelve el estado actual del envío."""
-        prev = repo.outbox_get(self._conn, request_id)
+    async def enqueue(
+        self, request_id: str, payload: Mapping[str, Any], chat_jid: str
+    ) -> dict[str, Any]:
+        """Encola (idempotente por request_id) y devuelve el estado actual del envío.
+
+        Una vez enviado al hilo del writer, la operación (commit + emisión) se completa aunque se
+        cancele al llamante (p. ej. timeout del handler): `shield` evita un mensaje persistido y
+        encolado pero nunca emitido. `stop()` espera las operaciones en vuelo.
+        """
+        task = asyncio.ensure_future(self._enqueue(request_id, payload, chat_jid))
+        self._inflight.add(task)
+        task.add_done_callback(self._inflight.discard)
+        return await asyncio.shield(task)
+
+    async def _enqueue(
+        self, request_id: str, payload: Mapping[str, Any], chat_jid: str
+    ) -> dict[str, Any]:
+        placeholder = self._placeholder(request_id, payload, chat_jid)
+        item, created = await self._writer.run(
+            self._enqueue_tx, request_id, chat_jid, payload, placeholder
+        )
+        if created and placeholder is not None:
+            self._emit(placeholder)
+        if created:
+            self._wake.set()
+        return self._result(item)
+
+    def _placeholder(
+        self, request_id: str, payload: Mapping[str, Any], chat_jid: str
+    ) -> MessageNew | None:
+        """Mensaje `pending` visible de inmediato (solo texto/respuesta; reacciones no)."""
+        if payload["kind"] not in ("text", "reply"):
+            return None
+        return MessageNew(
+            chat_jid=chat_jid,
+            wa_id=placeholder_id(request_id),
+            from_me=True,
+            ts=self._now(),
+            kind="text",
+            body=payload["text"],
+            quoted_wa_id=payload.get("quoted_wa_id"),
+            status="pending",
+        )
+
+    def _enqueue_tx(
+        self,
+        conn: sqlite3.Connection,
+        request_id: str,
+        chat_jid: str,
+        payload: Mapping[str, Any],
+        placeholder: MessageNew | None,
+    ) -> tuple[repo.OutboxItem, bool]:
+        """Hilo del writer. (estado actual, True si se creó ahora). Una transacción atómica."""
+        prev = repo.outbox_get(conn, request_id)
         if prev is not None:
-            return self._result(prev)
-        kind = payload["kind"]
+            return prev, False
         try:
-            with db.transaction(self._conn):
-                repo.outbox_put(self._conn, request_id, chat_jid, payload, self._now())
-                if kind in ("text", "reply"):
-                    repo.upsert_chat(self._conn, chat_jid)
-                    repo.upsert_message(
-                        self._conn,
-                        repo.MessageIn(
-                            chat_jid=chat_jid,
-                            wa_id=placeholder_id(request_id),
-                            ts=self._now(),
-                            from_me=True,
-                            kind="text",
-                            body=payload["text"],
-                            quoted_wa_id=payload.get("quoted_wa_id"),
-                            status="pending",
-                        ),
-                        count_unread=False,
-                    )
+            with db.transaction(conn):
+                repo.outbox_put(conn, request_id, chat_jid, payload, self._now())
+                if placeholder is not None:
+                    repo.upsert_chat(conn, chat_jid)
+                    repo.upsert_message(conn, message_in(placeholder), count_unread=False)
         except ValueError:
             raise CommandError("payload_too_big", "mensaje demasiado grande") from None
         except sqlite3.Error as e:
             log.error("encolar falló exc=%s", type(e).__name__)
             raise CommandError("internal", "no se pudo encolar") from None
-        if kind in ("text", "reply"):
-            self._emit(
-                MessageNew(
-                    chat_jid=chat_jid,
-                    wa_id=placeholder_id(request_id),
-                    from_me=True,
-                    ts=self._now(),
-                    kind="text",
-                    body=payload["text"],
-                    quoted_wa_id=payload.get("quoted_wa_id"),
-                    status="pending",
-                )
-            )
-        self._wake.set()
-        item = repo.outbox_get(self._conn, request_id)
+        item = repo.outbox_get(conn, request_id)
         if item is None:
             raise CommandError("internal", "no se pudo encolar")
-        return self._result(item)
+        return item, True
 
     @staticmethod
     def _result(item: repo.OutboxItem) -> dict[str, Any]:
@@ -177,26 +202,34 @@ class Outbox:
             self._task = asyncio.create_task(self._run(), name="outbox")
 
     async def stop(self, drain_seconds: float = 10.0) -> None:
-        """Deja terminar el envío en curso (drain) y detiene el worker."""
+        """Deja terminar el envío en curso (drain), detiene el worker y espera lo en vuelo."""
         self._stopping = True
         self._wake.set()
         task, self._task = self._task, None
-        if task is None:
-            return
         try:
-            await asyncio.wait_for(task, drain_seconds)
-        except TimeoutError:
-            log.warning("outbox: drain agotó el tiempo")
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            log.error("outbox terminó con error exc=%s", type(e).__name__)
+            if task is not None:
+                try:
+                    await asyncio.wait_for(task, drain_seconds)
+                except TimeoutError:
+                    log.warning("outbox: drain agotó el tiempo")
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    log.error("outbox terminó con error exc=%s", type(e).__name__)
+        finally:
+            await self.join()
+
+    async def join(self) -> None:
+        """Espera los encolados ya enviados al writer (commit + emisión)."""
+        if self._inflight:
+            await asyncio.gather(*self._inflight, return_exceptions=True)
 
     async def _run(self) -> None:
         while not self._stopping:
-            item = repo.outbox_next(self._conn)
+            # clear ANTES de consultar: un wake durante el salto de hilo no se pierde.
+            self._wake.clear()
+            item = await self._writer.run(repo.outbox_next)
             if item is None:
-                self._wake.clear()
                 try:
                     await asyncio.wait_for(self._wake.wait(), IDLE_POLL)
                 except TimeoutError:
@@ -217,7 +250,7 @@ class Outbox:
                 item, _error_code(e), type(e).__name__, final=isinstance(e, TimeoutError)
             )
             return
-        self._on_sent(item, res.wa_id)
+        await self._on_sent(item, res.wa_id)
 
     async def _send(self, item: repo.OutboxItem) -> Any:
         p = item.payload
@@ -233,30 +266,28 @@ class Outbox:
             case _:
                 raise ValueError("kind")
 
-    def _on_sent(self, item: repo.OutboxItem, real_id: str) -> None:
-        chat = item.chat_jid
-        old = placeholder_id(item.request_id)
+    async def _on_sent(self, item: repo.OutboxItem, real_id: str) -> None:
+        # Si cancelan al worker, el trabajo ya iniciado en el hilo igual hace commit completo.
         try:
-            with db.transaction(self._conn):
-                if item.payload.get("kind") == "react":
-                    repo.upsert_reaction(
-                        self._conn,
-                        chat,
-                        item.payload["wa_id"],
-                        "me",
-                        item.payload["emoji"],
-                        self._now(),
-                    )
-                else:
-                    repo.rebind_wa_id(self._conn, chat, old, real_id)
-                    repo.update_status(self._conn, chat, real_id, "sent")
-                repo.outbox_done(self._conn, item.request_id, real_id)
+            await self._writer.run(self._close_sent, item, real_id)
         except sqlite3.Error as e:
             log.error("cerrar envío falló exc=%s", type(e).__name__)
             return
-        if item.payload.get("kind") == "react":
-            return
-        self._emit(MessageStatus(chat_jid=chat, wa_id=real_id, status="sent"))
+        if item.payload.get("kind") != "react":
+            self._emit(MessageStatus(chat_jid=item.chat_jid, wa_id=real_id, status="sent"))
+
+    def _close_sent(self, conn: sqlite3.Connection, item: repo.OutboxItem, real_id: str) -> None:
+        """Hilo del writer; una transacción atómica."""
+        chat = item.chat_jid
+        with db.transaction(conn):
+            if item.payload.get("kind") == "react":
+                repo.upsert_reaction(
+                    conn, chat, item.payload["wa_id"], "me", item.payload["emoji"], self._now()
+                )
+            else:
+                repo.rebind_wa_id(conn, chat, placeholder_id(item.request_id), real_id)
+                repo.update_status(conn, chat, real_id, "sent")
+            repo.outbox_done(conn, item.request_id, real_id)
 
     async def _on_error(
         self, item: repo.OutboxItem, code: str, exc_type: str, *, final: bool = False
@@ -264,119 +295,97 @@ class Outbox:
         log.warning("envío falló attempt=%d code=%s exc=%s", item.attempts, code, exc_type)
         retry = not final and item.attempts < self._cfg.max_attempts and not self._stopping
         try:
-            repo.outbox_fail(self._conn, item.request_id, code, retry=retry)
-            if not retry:
-                self._mark_failed(item, code)
+            await self._writer.run(self._record_failure, item, code, retry)
         except sqlite3.Error as e:
             log.error("registrar fallo falló exc=%s", type(e).__name__)
             return
+        if not retry and item.payload.get("kind") != "react":
+            self._emit(
+                MessageStatus(
+                    chat_jid=item.chat_jid,
+                    wa_id=placeholder_id(item.request_id),
+                    status="failed",
+                    error=code,
+                )
+            )
         if retry:
             await self._sleep(self._cfg.retry_base * 2 ** (item.attempts - 1))
 
-    def _mark_failed(self, item: repo.OutboxItem, code: str) -> None:
-        if item.payload.get("kind") == "react":
-            return
-        wa_id = placeholder_id(item.request_id)
-        repo.update_status(self._conn, item.chat_jid, wa_id, "failed", code)
-        self._emit(MessageStatus(chat_jid=item.chat_jid, wa_id=wa_id, status="failed", error=code))
+    @staticmethod
+    def _record_failure(
+        conn: sqlite3.Connection, item: repo.OutboxItem, code: str, retry: bool
+    ) -> None:
+        """Hilo del writer: fila de outbox y, si es definitivo, el mensaje placeholder."""
+        repo.outbox_fail(conn, item.request_id, code, retry=retry)
+        if not retry and item.payload.get("kind") != "react":
+            repo.update_status(conn, item.chat_jid, placeholder_id(item.request_id), "failed", code)
 
 
 # ---- handler de comandos del socket ------------------------------------------------------
 
 
-def message_event(r: repo.MessageRow) -> MessageNew:
-    return MessageNew(
-        chat_jid=r.chat_jid,
-        wa_id=r.wa_id,
-        sender_jid=r.sender_jid,
-        from_me=r.from_me,
-        ts=r.ts,
-        kind=r.kind,
-        body=r.body,
-        quoted_wa_id=r.quoted_wa_id,
-        status=r.status,
-        error=r.error,
-        edited_at=r.edited_at,
-        deleted_at=r.deleted_at,
-    )
-
-
-def chat_event(c: repo.ChatRow) -> ChatUpdated:
-    return ChatUpdated(
-        jid=c.jid,
-        kind=c.kind,
-        title=c.title,
-        unread_count=c.unread_count,
-        last_message_at=c.last_message_at,
-        archived=c.archived,
-        muted_until=c.muted_until,
-        pinned=c.pinned,
-    )
-
-
 class Commands:
-    """`Handler` del `Server`: despacha comandos al outbox o al store."""
+    """`Handler` del `Server`: despacha comandos al outbox o al store (SQLite en el hilo writer)."""
 
-    def __init__(self, conn: sqlite3.Connection, outbox: Outbox) -> None:
-        self._conn = conn
+    def __init__(self, writer: Writer, outbox: Outbox) -> None:
+        self._writer = writer
         self._outbox = outbox
 
     async def __call__(self, request_id: str, cmd: HandledCommand) -> Mapping[str, Any]:
         try:
-            return self._dispatch(request_id, cmd)
+            return await self._dispatch(request_id, cmd)
         except ValidationError:
             raise CommandError("internal", "datos inválidos en el store") from None
         except sqlite3.Error as e:
             log.error("comando falló exc=%s", type(e).__name__)
             raise CommandError("internal", "error de almacenamiento") from None
 
-    def _dispatch(self, rid: str, cmd: HandledCommand) -> Mapping[str, Any]:
-        conn = self._conn
+    async def _dispatch(self, rid: str, cmd: HandledCommand) -> Mapping[str, Any]:
         match cmd:
             case SendText():
-                return self._outbox.enqueue(rid, {"kind": "text", "text": cmd.text}, cmd.chat_jid)
+                return await self._outbox.enqueue(
+                    rid, {"kind": "text", "text": cmd.text}, cmd.chat_jid
+                )
             case SendReply():
+                author = await self._writer.run(repo.message_sender, cmd.chat_jid, cmd.quoted_wa_id)
                 payload = {
                     "kind": "reply",
                     "text": cmd.text,
                     "quoted_wa_id": cmd.quoted_wa_id,
-                    "quoted_sender": self._sender_of(cmd.chat_jid, cmd.quoted_wa_id),
+                    "quoted_sender": None if author is None else author[0],
                 }
-                return self._outbox.enqueue(rid, payload, cmd.chat_jid)
+                return await self._outbox.enqueue(rid, payload, cmd.chat_jid)
             case React():
-                if not self._exists(cmd.chat_jid, cmd.wa_id):
+                author = await self._writer.run(repo.message_sender, cmd.chat_jid, cmd.wa_id)
+                if author is None:
                     raise CommandError("not_found", "mensaje desconocido")
                 payload = {
                     "kind": "react",
                     "wa_id": cmd.wa_id,
                     "emoji": cmd.emoji,
-                    "author_jid": self._sender_of(cmd.chat_jid, cmd.wa_id),
+                    "author_jid": author[0],
                 }
-                return self._outbox.enqueue(rid, payload, cmd.chat_jid)
-            case MarkRead():
-                return {"changed": repo.mark_read(conn, cmd.chat_jid)}
-            case ListChats():
-                chats = repo.list_chats(conn, cmd.limit)
-                return {"chats": [chat_event(c).model_dump(mode="json") for c in chats]}
-            case History():
-                rows = repo.last_messages(conn, cmd.chat_jid, cmd.n)
-                return {"messages": [message_event(r).model_dump(mode="json") for r in rows]}
-            case Search():
-                rows = repo.search(conn, cmd.q, cmd.limit)
-                return {"messages": [message_event(r).model_dump(mode="json") for r in rows]}
-            case Mute():
-                repo.upsert_chat(conn, cmd.chat_jid, muted_until=cmd.until)
-                return {"muted_until": cmd.until}
+                return await self._outbox.enqueue(rid, payload, cmd.chat_jid)
+            case _:
+                return await self._writer.run(_store_command, cmd)
 
-    def _exists(self, chat_jid: str, wa_id: str) -> bool:
-        row = self._conn.execute(
-            "SELECT 1 FROM messages WHERE chat_jid = ? AND wa_id = ? LIMIT 1", (chat_jid, wa_id)
-        ).fetchone()
-        return row is not None
 
-    def _sender_of(self, chat_jid: str, wa_id: str) -> str | None:
-        row = self._conn.execute(
-            "SELECT sender_jid FROM messages WHERE chat_jid = ? AND wa_id = ? LIMIT 1",
-            (chat_jid, wa_id),
-        ).fetchone()
-        return None if row is None else row["sender_jid"]
+def _store_command(conn: sqlite3.Connection, cmd: HandledCommand) -> Mapping[str, Any]:
+    """Comandos que solo tocan el store (hilo del writer, incluida la serialización)."""
+    match cmd:
+        case MarkRead():
+            return {"changed": repo.mark_read(conn, cmd.chat_jid)}
+        case ListChats():
+            chats = repo.list_chats(conn, cmd.limit)
+            return {"chats": [chat_event(c).model_dump(mode="json") for c in chats]}
+        case History():
+            rows = repo.last_messages(conn, cmd.chat_jid, cmd.n)
+            return {"messages": [message_event(r).model_dump(mode="json") for r in rows]}
+        case Search():
+            rows = repo.search(conn, cmd.q, cmd.limit)
+            return {"messages": [message_event(r).model_dump(mode="json") for r in rows]}
+        case Mute():
+            repo.upsert_chat(conn, cmd.chat_jid, muted_until=cmd.until)
+            return {"muted_until": cmd.until}
+        case _:  # pragma: no cover - lo despachan SendText/SendReply/React
+            raise CommandError("internal", "comando no soportado")

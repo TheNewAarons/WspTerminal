@@ -485,6 +485,15 @@ def last_messages(conn: sqlite3.Connection, chat_jid: str, n: int = 50) -> list[
     return [_msg(r) for r in reversed(rows)]
 
 
+def message_sender(conn: sqlite3.Connection, chat_jid: str, wa_id: str) -> tuple[str | None] | None:
+    """None si el mensaje no existe; si existe, `(sender_jid,)` (sender None = propio/directo)."""
+    row = conn.execute(
+        "SELECT sender_jid FROM messages WHERE chat_jid = ? AND wa_id = ? LIMIT 1",
+        (chat_jid, wa_id),
+    ).fetchone()
+    return None if row is None else (row["sender_jid"],)
+
+
 def fts_query(text: str) -> str:
     """Texto libre a consulta FTS5 segura: máx. 16 tokens citados de ≤64 chars, AND.
 
