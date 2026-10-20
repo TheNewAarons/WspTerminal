@@ -65,18 +65,18 @@ Ejecutar antes de F3.4 (persistencia). Un solo archivo `wsp/store/migrations/000
 
 ---
 
-## Fase 2 — Protocolo pydantic + socket Unix (rama `phase-2-protocolo`)
+## Fase 2 — Protocolo pydantic + socket Unix (rama `feat/f2-protocol`, commits cead574, b0219d4 y de79c26)
 
-- [ ] **F2.1** Modelos pydantic v2 versionados (eventos: mensaje, estado, reacción, conexión; comandos: send, react, mute, history, search, hello/since) · Agente: orquestador · Deps: F1.13 · Aceptación: `uv run pytest tests/protocol/test_models.py -q` (round-trip, campo `v`, rechazo de inválidos/versión desconocida)
-- [ ] **F2.2** `request_id` idempotente, ack/error con motivo · Agente: orquestador · Deps: F2.1 · Aceptación: `uv run pytest tests/protocol/test_idempotency.py -q`
-- [ ] **F2.3** Codec JSON por líneas con límite de tamaño · Agente: orquestador · Deps: F2.1 · Aceptación: `uv run pytest tests/protocol/test_codec.py -q`
-- [ ] **F2.4** Servidor asyncio en `wspd.sock` (600), limpieza de socket obsoleto, broadcast; cliente lento no bloquea · Agente: orquestador · Deps: F2.3 · Aceptación: `uv run pytest tests/daemon/test_socket_server.py -q`
-- [ ] **F2.5** Cliente asyncio (reconexión, handshake `since`, error claro sin daemon) · Agente: orquestador · Deps: F2.4 · Aceptación: `uv run pytest tests/cli/test_socket_client.py -q`
-- [ ] **F2.6** Tests de protocolo y socket sin sleeps frágiles · Agente: bulk-agent · Deps: F2.5 · Aceptación: `uv run pytest tests/protocol tests/daemon tests/cli -q`
-- [ ] **F2.7** Gates en verde · Agente: orquestador · Deps: F2.6 · Aceptación: `uv run pytest && uv run ruff check && uv run ruff format --check && uv run mypy wsp`
-- [ ] **F2.8** security-reviewer sobre `git diff main...HEAD` · Agente: security-reviewer · Deps: F2.7 · Aceptación: sin bloqueantes (validación de entrada, permisos, DoS por línea)
+- [x] **F2.1** Modelos pydantic v2 versionados (eventos: mensaje, estado, reacción, conexión; comandos: send, react, mute, history, search, hello/since) · Agente: orquestador · Deps: F1.13 · Aceptación: `uv run pytest tests/protocol/test_models.py -q` (round-trip, campo `v`, rechazo de inválidos/versión desconocida)
+- [x] **F2.2** `request_id` idempotente (idempotencia por request_id implementada), ack/error con motivo · Agente: orquestador · Deps: F2.1 · Aceptación: `uv run pytest tests/protocol/test_idempotency.py -q`
+- [x] **F2.3** Codec JSON por líneas con límite de tamaño · Agente: orquestador · Deps: F2.1 · Aceptación: `uv run pytest tests/protocol/test_codec.py -q`
+- [x] **F2.4** Servidor asyncio en `wspd.sock` (600), limpieza de socket obsoleto, broadcast; cliente lento no bloquea · Agente: orquestador · Deps: F2.3 · Aceptación: `uv run pytest tests/daemon/test_socket_server.py -q`
+- [x] **F2.5** Cliente asyncio (reconexión, handshake `since`, error claro sin daemon) · Agente: orquestador · Deps: F2.4 · Aceptación: `uv run pytest tests/cli/test_socket_client.py -q`
+- [x] **F2.6** Tests de protocolo y socket sin sleeps frágiles · Agente: bulk-agent · Deps: F2.5 · Aceptación: `uv run pytest tests/protocol tests/daemon tests/cli -q`
+- [x] **F2.7** Gates en verde (200 tests, ruff/mypy limpios) · Agente: orquestador · Deps: F2.6 · Aceptación: `uv run pytest && uv run ruff check && uv run ruff format --check && uv run mypy wsp`
+- [x] **F2.8** security-reviewer sobre `git diff main...HEAD` · Agente: security-reviewer · Deps: F2.7 · Aceptación: sin bloqueantes (validación de entrada, permisos, DoS por línea); fixes aplicados en de79c26
 - [ ] **F2.9** PR fase 2 · Agente: orquestador · Deps: F2.8 · Aceptación: `gh pr view --json state,mergeable`
-- [ ] **F2.10** Cierre: actualizar TASK_PLAN.md · Agente: planner · Deps: F2.9 · Aceptación: sin `[~]` en fase 2
+- [x] **F2.10** Cierre: actualizar TASK_PLAN.md · Agente: planner · Deps: F2.9 · Aceptación: sin `[~]` en fase 2
 
 ---
 
@@ -102,6 +102,11 @@ Pendientes trasladados de Fase 1 (completar antes de F3.11):
 - [ ] **F3.15** (A1) Daemon guarda siempre `sender_jid=chat_jid` en entrantes directos; test de integración; contadores de `applied=False` sin PII · Agente: orquestador · Deps: F3.4, F1.14 · Aceptación: `uv run pytest tests/daemon/test_persistence.py -q`
 - [ ] **F3.16** (M2) Daemon ejecuta FTS `optimize` + `wal_checkpoint(TRUNCATE)` tras borrados · Agente: orquestador · Deps: F3.4 · Aceptación: `uv run pytest tests/daemon/test_maintenance.py -q`
 - [ ] **F3.17** (M3) Errores de outbox/status como códigos, no texto libre; normalizar separadores antes de redactar dígitos · Agente: orquestador · Deps: F3.1, F3.5 · Aceptación: `uv run pytest tests/daemon/test_log_redaction.py -q` (`+34 600-123-456` redactado)
+
+Pendientes trasladados de Fase 2 (security-reviewer):
+
+- [ ] **F3.18** (M4) `flock` sobre lockfile para evitar dos daemons en carrera en `_remove_stale` del socket (decidir en F3 o F4.1/F4.2) · Agente: orquestador · Deps: F3.1 · Aceptación: `uv run pytest tests/daemon/test_socket_server.py -q` (segundo arranque falla sin borrar el socket vivo)
+- [ ] **F3.19** (B2) Revisar `umask` global dentro de `Server.start()` (efecto lateral en el proceso); preferir `umask 0o077` de F3.1 + `chmod` explícito del socket · Agente: orquestador · Deps: F3.1 · Aceptación: test de que `Server.start()` no altera el umask del proceso y el socket queda 600
 
 ---
 
@@ -137,6 +142,7 @@ Pendientes trasladados de Fase 1 (completar antes de F3.11):
 - [ ] **F5.11** PR fase 5 · Agente: orquestador · Deps: F5.10 · Aceptación: `gh pr view --json state,mergeable`
 - [ ] **F5.12** Cierre: actualizar TASK_PLAN.md · Agente: planner · Deps: F5.11 · Aceptación: sin `[~]` en fase 5
 - [ ] **F5.13** (B6, trasladado de F1) Paginar `messages_since` con cursor `(ts,id)` · Agente: orquestador · Deps: F5.5 · Aceptación: `uv run pytest tests/cli/test_reconnect_backfill.py -q` (sin saltos ni duplicados entre páginas; completar antes de F5.9)
+- [ ] **F5.14** (M3, trasladado de F2) Cursor `since` basado en ts puede perder mensajes viejos que llegan tarde; usar cursor por rowid/secuencia monótona en handshake `since`, `messages_since` y cliente · Agente: orquestador · Deps: F5.5 · Aceptación: `uv run pytest tests/cli/test_reconnect_backfill.py -q` (mensaje con ts antiguo insertado tarde se entrega; completar junto con F5.13)
 
 ---
 
@@ -168,4 +174,6 @@ Pendientes trasladados de Fase 1 (completar antes de F3.11):
 2026-10-20 · F0 · Fase 0 cerrada: 8 tests en verde, security-reviewer sin bloqueantes (altos/medios corregidos en 5610e19), PR abierto en `feat/f0-bootstrap`. pip-audit no corre en sandbox: pendiente que el usuario ejecute fuera `uv export --no-dev | uvx pip-audit -r /dev/stdin`.
 2026-10-20 · F1 · Fase 1 cerrada (29eb3bb, 1344b9c): 63 tests, ruff/mypy limpios, security-reviewer sin bloqueantes; 100k msgs/300 chats: last_messages ~0.2 ms, search ~9 ms, sin full scan. PR F1.12 pendiente.
 2026-10-20 · F1 · Trasladado: 0003 (F1.14–F1.21), F3.15–F3.17, F5.13. Externo: pip-audit sigue pendiente (usuario, fuera del sandbox).
+2026-10-20 · F2 · Fase 2 cerrada (cead574, b0219d4, de79c26): 200 tests, ruff/mypy limpios, security-reviewer sin bloqueantes, fixes aplicados; idempotencia por request_id hecha. F2.9 (PR) pendiente.
+2026-10-20 · F2 · Diferidos: M3 cursor por rowid -> F5.14 (junto a F5.13); M4 flock anti doble daemon -> F3.18; B2 umask en Server.start() -> F3.19.
 2026-10-20 · F0 · `.claude/settings.json` y `.claude/hooks/*.sh` siguen con el stack viejo (el sandbox impide editarlos); pendiente actualizarlos fuera del sandbox.
