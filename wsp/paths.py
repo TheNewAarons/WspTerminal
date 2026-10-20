@@ -46,6 +46,12 @@ def config_path() -> Path:
     return config_dir() / "config.toml"
 
 
+def launch_agents_dir() -> Path:
+    """LaunchAgents del usuario; con `WSP_HOME` queda aislado (tests nunca tocan el real)."""
+    root = _root()
+    return root / "LaunchAgents" if root else Path.home() / "Library" / "LaunchAgents"
+
+
 def ensure_dirs() -> None:
     """Crea los directorios con permisos 700; rechaza symlinks y dueños ajenos."""
     for d in (data_dir(), state_dir(), config_dir()):
