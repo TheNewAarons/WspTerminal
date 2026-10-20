@@ -1,6 +1,6 @@
 ---
 name: refactor-agent
-description: Refactorizaciones masivas y optimización de código con análisis semántico profundo.
+description: Refactor de wsp al cerrar fases 4 y 6: duplicación, async bloqueante, cancelación limpia, latencia evento→pantalla (p50/p95 antes y después), sin cambiar comportamiento.
 tools: Read, Grep, Glob, Edit, Write, Bash
 ---
 
@@ -23,4 +23,4 @@ Eres un arquitecto de software senior especializado en refactorizaciones masivas
 2. Identificar problemas específicos
 3. Proponer plan de refactorización
 4. Implementar por fases
-5. Verificar con tests existentes
+5. Verificar: `uv run pytest`, `ruff check`, `ruff format --check`, `mypy wsp` en verde; sin cambiar comportamiento

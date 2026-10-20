@@ -16,7 +16,8 @@ paths:
 ## 2. Estrategia de Ramificación (Git Flow / Trunk-Based)
 - Prohibido hacer commits o push directos a la rama principal (`main` / `master`).
 - Nombres de ramas estandarizados:
-  - **Funcionalidades:** `feat/{{autor}}/{{short-description}}` o `task/{{id}}`
+  - **Fases:** `phase-N-<tema>`
+  - **Funcionalidades:** `feat/{{short-description}}`
   - **Correcciones:** `fix/{{issue-id}}/{{short-description}}` o `bugfix/{{issue-number}}`
   - **Refactorización:** `refactor/{{modulo}}`
   - **Documentación / Chores:** `docs/{{tema}}` o `chore/{{tarea}}`
@@ -32,4 +33,4 @@ paths:
 - **Fusión (Merge):** Usar `gh pr merge --squash` o realizar merge manual en local. **No esperar ningún estado de aprobación de CI/Checks.**
 
 ## 5. Mantenimiento Autónomo de `.gitignore`
-Asegurar siempre que archivos `.env`, `.claude/settings.local.json`, `node_modules/`, `dist/`, `.venv/` y binarios estén en `.gitignore`.
+Asegurar siempre que archivos `.env`, `.claude/settings.local.json`, `.venv/`, la DB SQLite, la sesión de neonize y binarios estén en `.gitignore`.

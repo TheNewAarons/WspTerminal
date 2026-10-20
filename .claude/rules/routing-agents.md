@@ -11,7 +11,7 @@ paths:
 ## 1. Routing por Niveles (Tiers)
 - **Tier 1 (High Effort / Architecture):** `claude` (Claude 3.7 Sonnet / Opus Nativo) -> Arquitectura core, debugging de concurrencia, refactorizaciones críticas y revisión de seguridad.
 - **Tier 2 (Mid Effort / Feature):** `claude-ds` (DeepSeek V4) / `claude-qwen` (Qwen Max) -> Endpoints API, componentes UI, algoritmos y features estándar.
-- **Tier 3 (Low Effort / Bulk):** `claude-kimi` (Kimi K3) / `claude-qwen` (Qwen Max) -> Escaneo de repositorio, redactar/actualizar `TASK_PLAN.md`, unit tests, tipos Zod/TS, JSDoc y linters.
+- **Tier 3 (Low Effort / Bulk):** `claude-kimi` (Kimi K3) / `claude-qwen` (Qwen Max) -> Escaneo de repositorio, redactar/actualizar `TASK_PLAN.md`, tests pytest, docstrings, type hints y arreglos de ruff/mypy.
 
 ## 2. Reglas Autónomas de Delegación
 - **Evaluación Preliminar (>3 archivos o >200 líneas):** Si la tarea es de Tier 2 o Tier 3, advierte al usuario o genera un script/comando para delegarla al subagente correspondiente (`claude-qwen`, `claude-ds` o `claude-kimi`).
