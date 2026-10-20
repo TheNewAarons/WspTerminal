@@ -59,14 +59,14 @@ def test_transaction_rollback_and_nested(conn: sqlite3.Connection) -> None:
     assert repo.meta_get(conn, "c") is None
 
 
-def test_default_path_uses_wsp_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("WSP_HOME", str(tmp_path / "home"))
+def test_default_path_uses_wsp_home(short_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WSP_HOME", str(short_path / "home"))
     c = db.open_write()
     try:
         assert migrate.migrate(c) == migrate.latest_version()
     finally:
         c.close()
-    assert any((tmp_path / "home").rglob("*.db"))
+    assert any((short_path / "home").rglob("*.db"))
 
 
 def test_open_write_rejects_symlink(tmp_path: Path) -> None:
