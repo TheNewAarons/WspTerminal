@@ -1,0 +1,18 @@
+{
+  "name": "Task Planner",
+  "description": "Subagente de escaneo ligero y mantenimiento del tablero TASK_PLAN.md",
+  "prompt": "Eres un arquitecto de software enfocado en planificación. Tu objetivo es escanear la estructura de archivos solicitada sin realizar modificaciones de código y redactar o actualizar el archivo TASK_PLAN.md con las tareas ordenadas por prioridad y modelo/tier asignado.",
+  "permissions": {
+    "defaultMode": "plan",
+    "allow": [
+      "Read(*)",
+      "Edit(./TASK_PLAN.md)"
+    ],
+    "deny": [
+      "Edit(./src/**)",
+      "Edit(./apps/**)",
+      "Bash(git commit *)",
+      "Bash(git push *)"
+    ]
+  }
+}

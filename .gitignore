@@ -1,0 +1,53 @@
+# Claude Code Local files
+.claude/settings.local.json
+.claude/backups/
+.claude/memory/
+.claude/iteration-count
+
+# Dependencies
+node_modules/
+jspm_packages/
+web_modules/
+.pnpm-store/
+
+# Python Virtual Environments & Cache
+.venv/
+venv/
+ENV/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# Build and Dist
+dist/
+build/
+.next/
+out/
+.expo/
+web-build/
+
+# IDEs & System files
+.DS_Store
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+
+# Environment Secrets
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.env.*.local
+secrets/
+*.pem
+*.key

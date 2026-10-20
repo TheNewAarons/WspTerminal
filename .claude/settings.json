@@ -1,0 +1,211 @@
+{
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "blockReadsOutsideWorkingDirectories": true,
+    "disableBypassPermissionsMode": "disable",
+    "allowManagedPermissionRulesOnly": true,
+    "allow": [
+      "Bash(git status)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(gh status)",
+      "Bash(gh issue list)",
+      "Bash(gh pr list)",
+      "Bash(docker-compose ps)",
+      "Bash(docker-compose logs *)",
+      "Bash(pnpm exec tsc --noEmit)",
+      "Bash(pnpm run lint)",
+      "Bash(pnpm test)",
+      "Bash(pytest)",
+      "Bash(ruff check .)",
+      "Bash(python manage.py check)",
+      "Bash(python manage.py showmigrations)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:docs.anthropic.com)",
+      "WebFetch(domain:*.npmjs.org)",
+      "WebFetch(domain:*.pypi.org)",
+      "WebFetch(domain:api.anthropic.com)"
+    ],
+    "ask": [
+      "Bash(git push *)",
+      "Bash(git merge *)",
+      "Bash(git rebase *)",
+      "Bash(git checkout -b *)",
+      "Bash(gh pr create *)",
+      "Bash(gh pr merge *)",
+      "Bash(gh issue create *)",
+      "Bash(pnpm add *)",
+      "Bash(pnpm remove *)",
+      "Bash(pip install *)",
+      "Bash(python manage.py migrate)",
+      "Bash(docker-compose up *)",
+      "Bash(docker-compose down *)",
+      "WebFetch(*)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./secrets/**)",
+      "Bash(git push --force *)",
+      "Bash(rm -rf /)",
+      "Bash(npm *)",
+      "Bash(npx *)",
+      "Bash(yarn *)",
+      "Bash(curl *)",
+      "Bash(wget *)",
+      "Bash(sudo *)",
+      "Bash(chmod 777 *)",
+      "Edit(./.env)",
+      "Edit(./secrets/**)",
+      "WebFetch(domain:pastebin.com)",
+      "WebFetch(domain:gist.githubusercontent.com)",
+      "WebFetch(domain:uploads.github.com)",
+      "WebFetch(domain:*.internal)",
+      "WebFetch(domain:*.local)"
+    ]
+  },
+  "bashOutputMaxChars": 30000,
+  "skillListingBudgetFraction": 0.01,
+  "skillListingMaxDescChars": 1536,
+  "env": {
+    "NODE_ENV": "development",
+    "DISABLE_AUTO_COMPACT": "0"
+  },
+  "attribution": {
+    "commit": "Co-authored-by: Claude Code <noreply@anthropic.com>",
+    "pr": "Generado mediante Claude Code"
+  },
+  "claudeMdExcludes": [
+    "**/vendor/**/CLAUDE.md",
+    "**/node_modules/**/CLAUDE.md",
+    "**/dist/**/CLAUDE.md",
+    "**/.venv/**/CLAUDE.md"
+  ],
+  "modelSettings": {
+    "claude-sonnet-5": {
+      "autoCompactWindow": 200000,
+      "maxEffortLevel": "high"
+    },
+    "claude-haiku-4-5": {
+      "autoCompactWindow": 150000,
+      "maxEffortLevel": "medium"
+    },
+    "kimi-k3": {
+      "autoCompactWindow": 100000,
+      "maxEffortLevel": "low"
+    },
+    "deepseek-v4": {
+      "autoCompactWindow": 200000,
+      "maxEffortLevel": "high"
+    },
+    "qwen-3.7-max": {
+      "autoCompactWindow": 150000,
+      "maxEffortLevel": "medium"
+    }
+  },
+  "fallbackModel": [
+    "claude-sonnet-5",
+    "claude-haiku-4-5"
+  ],
+  "effortLevel": "medium",
+  "maxEffortLevel": "high",
+  "sandbox": {
+    "enabled": true,
+    "autoAllowBashIfSandboxed": true,
+    "excludedCommands": [
+      "docker *",
+      "docker-compose *"
+    ],
+    "filesystem": {
+      "allowWrite": [
+        "/tmp/build",
+        "./.next",
+        "./dist"
+      ],
+      "denyRead": [
+        "~/.ssh",
+        "~/.aws/credentials",
+        "~/.env",
+        "./.env",
+        "./secrets/**"
+      ],
+      "allowRead": [
+        "./.claude/**",
+        "./TASK_PLAN.md",
+        "./CLAUDE.md"
+      ]
+    },
+    "network": {
+      "allowedDomains": [
+        "github.com",
+        "*.npmjs.org",
+        "*.pypi.org",
+        "api.anthropic.com"
+      ],
+      "deniedDomains": [
+        "uploads.github.com",
+        "pastebin.com",
+        "gist.githubusercontent.com"
+      ],
+      "strictAllowlist": true
+    },
+    "credentials": {
+      "files": [
+        {
+          "path": "./.env",
+          "mode": "mask"
+        },
+        {
+          "path": "./secrets/**",
+          "mode": "deny"
+        },
+        {
+          "path": "~/.aws/credentials",
+          "mode": "deny"
+        },
+        {
+          "path": "~/.npmrc",
+          "mode": "mask"
+        }
+      ],
+      "envVars": [
+        {
+          "name": "NPM_TOKEN",
+          "mode": "deny"
+        },
+        {
+          "name": "AWS_ACCESS_KEY_ID",
+          "mode": "mask"
+        },
+        {
+          "name": "AWS_SECRET_ACCESS_KEY",
+          "mode": "mask"
+        },
+        {
+          "name": "DATABASE_URL",
+          "mode": "mask"
+        },
+        {
+          "name": "JWT_SECRET",
+          "mode": "deny"
+        },
+        {
+          "name": "API_KEY",
+          "mode": "deny"
+        }
+      ],
+      "injectHosts": [
+        "registry.npmjs.org",
+        "registry.pypi.org",
+        "api.github.com",
+        "api.anthropic.com"
+      ]
+    }
+  },
+  "promptCacheTtl": "1h",
+  "subagentPromptCacheTtl": "5m",
+  "autoCompactEnabled": true,
+  "autoCompactWindow": 200000,
+  "autoMemoryEnabled": true,
+  "autoMemoryDirectory": "./.claude/memory/"
+}
