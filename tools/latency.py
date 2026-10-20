@@ -85,6 +85,8 @@ def _client_thread(
 
     try:
         asyncio.run(run())
+    except TimeoutError:
+        pass  # los faltantes se reportan como perdidos
     finally:
         ready.set()
         done.set()
@@ -120,6 +122,8 @@ async def measure(n: int, rate: float) -> list[float]:
                 await asyncio.sleep(delay)
         sent[f"L{i}"] = time.perf_counter_ns()
         await wa.on_event("MessageEv", _event(i))
+        if not interval:
+            await asyncio.sleep(0)  # cada evento real llega en su propio callback del loop
     await asyncio.to_thread(done.wait, EVENT_TIMEOUT + n / 50)
     thread.join(5)
     stop.set()
