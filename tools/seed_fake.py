@@ -1,10 +1,11 @@
-"""Siembra una DB sintética (mensajes en español) para validar planes de consulta."""
+"""Siembra una DB sintética (mensajes en español, números ficticios 555-01xx)."""
 
 import argparse
 import random
 import time
 from pathlib import Path
 
+from wsp import paths
 from wsp.store import db, repo
 from wsp.store.migrate import migrate
 
@@ -37,9 +38,9 @@ def seed(path: Path, messages: int, chats: int, rng_seed: int = 42) -> None:
         jids: list[str] = []
         for i in range(chats):
             is_group = i % 3 == 0
-            jid = f"1203630{i:08d}@g.us" if is_group else f"5215500{i:06d}@s.whatsapp.net"
+            jid = f"1203630{i:08d}@g.us" if is_group else f"1555010{i:04d}@s.whatsapp.net"
             jids.append(jid)
-        members = [f"5215511{i:06d}@s.whatsapp.net" for i in range(40)]
+        members = [f"1555011{i:04d}@s.whatsapp.net" for i in range(40)]
         weights = [rng.paretovariate(1.2) for _ in jids]
         with db.transaction(conn):
             for i, jid in enumerate(jids):
@@ -76,6 +77,10 @@ def main() -> None:
     parser.add_argument("--messages", type=int, default=100_000)
     parser.add_argument("--chats", type=int, default=300)
     args = parser.parse_args()
+    if args.db.resolve() == paths.db_path().resolve():
+        parser.error("--db no puede ser la DB real de wsp")
+    if not 0 < args.chats <= 9999:
+        parser.error("--chats debe estar entre 1 y 9999")
     seed(args.db, args.messages, args.chats)
 
 

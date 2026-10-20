@@ -67,3 +67,40 @@ def test_default_path_uses_wsp_home(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     finally:
         c.close()
     assert any((tmp_path / "home").rglob("*.db"))
+
+
+def test_open_write_rejects_symlink(tmp_path: Path) -> None:
+    real = tmp_path / "real.db"
+    real.touch()
+    link = tmp_path / "link.db"
+    link.symlink_to(real)
+    with pytest.raises(PermissionError):
+        db.open_write(link)
+    with pytest.raises(PermissionError):
+        db.open_read(link)
+
+
+def test_open_write_creates_600(tmp_path: Path) -> None:
+    p = tmp_path / "new.db"
+    c = db.open_write(p)
+    c.close()
+    assert _mode(p) == 0o600
+
+
+def test_open_write_rejects_loose_parent(tmp_path: Path) -> None:
+    parent = tmp_path / "loose"
+    parent.mkdir()
+    parent.chmod(0o755)
+    with pytest.raises(PermissionError):
+        db.open_write(parent / "wsp.db")
+    assert not (parent / "wsp.db").exists()
+
+
+def test_open_read_schema_too_new(conn: sqlite3.Connection, db_path: Path) -> None:
+    conn.execute(f"PRAGMA user_version = {migrate.latest_version() + 1}")
+    with pytest.raises(migrate.SchemaTooNewError):
+        db.open_read(db_path)
+
+
+def test_secure_delete_on(conn: sqlite3.Connection) -> None:
+    assert conn.execute("PRAGMA secure_delete").fetchone()[0] == 1

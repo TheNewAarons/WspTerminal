@@ -1,4 +1,7 @@
+import json
 import sqlite3
+
+import pytest
 
 from wsp.store import repo
 from wsp.store.repo import MessageIn
@@ -77,7 +80,7 @@ def test_update_status_failed_stores_error(conn: sqlite3.Connection) -> None:
     assert repo.update_status(conn, CHAT, "1", "failed", "e" * 1000) is True
     row = conn.execute("SELECT status, error FROM messages").fetchone()
     assert row["status"] == "failed"
-    assert row["error"] == "e" * 500
+    assert row["error"] == "e" * 200
 
 
 def test_unread_only_for_incoming(conn: sqlite3.Connection) -> None:
@@ -103,8 +106,8 @@ def test_fts_accent_insensitive(conn: sqlite3.Connection) -> None:
 
 
 def test_fts_after_edit(conn: sqlite3.Connection) -> None:
-    repo.upsert_message(conn, MessageIn(CHAT, "1", 1, body="manzana"))
-    assert repo.apply_edit(conn, CHAT, "1", "pera", 5) is True
+    repo.upsert_message(conn, MessageIn(CHAT, "1", 1, body="manzana", sender_jid="s"))
+    assert repo.apply_edit(conn, CHAT, "1", "pera", 5, sender_jid="s") is True
     assert _hits(conn, "manzana") == []
     assert _hits(conn, "pera") == ["1"]
     m = repo.last_messages(conn, CHAT)[0]
@@ -112,11 +115,11 @@ def test_fts_after_edit(conn: sqlite3.Connection) -> None:
 
 
 def test_fts_after_delete(conn: sqlite3.Connection) -> None:
-    repo.upsert_message(conn, MessageIn(CHAT, "1", 1, body="secreto"))
-    assert repo.apply_delete(conn, CHAT, "1", 9) is True
-    assert repo.apply_delete(conn, CHAT, "1", 10) is False
+    repo.upsert_message(conn, MessageIn(CHAT, "1", 1, body="secreto", sender_jid="s"))
+    assert repo.apply_delete(conn, CHAT, "1", 9, sender_jid="s") is True
+    assert repo.apply_delete(conn, CHAT, "1", 10, sender_jid="s") is False
     assert _hits(conn, "secreto") == []
-    assert repo.apply_edit(conn, CHAT, "1", "nuevo", 11) is False
+    assert repo.apply_edit(conn, CHAT, "1", "nuevo", 11, sender_jid="s") is False
 
 
 def test_fts_after_purge(conn: sqlite3.Connection) -> None:
@@ -166,7 +169,6 @@ def test_purge_older_than(conn: sqlite3.Connection) -> None:
 
 
 def test_purge_rejects_nonpositive_days(conn: sqlite3.Connection) -> None:
-    import pytest
 
     with pytest.raises(ValueError):
         repo.purge_older_than(conn, 0)
@@ -203,7 +205,7 @@ def test_outbox_fail_and_retry(conn: sqlite3.Connection) -> None:
     assert (again.request_id, again.attempts, again.error) == ("r1", 2, "net")
     assert repo.outbox_fail(conn, "r1", "x" * 900) is True
     row = conn.execute("SELECT state, attempts, error FROM outbox WHERE request_id='r1'").fetchone()
-    assert (row["state"], row["attempts"], len(row["error"])) == ("failed", 2, 500)
+    assert (row["state"], row["attempts"], len(row["error"])) == ("failed", 2, 200)
     nxt = repo.outbox_next(conn)
     assert nxt is not None
     assert nxt.request_id == "r2"
@@ -318,3 +320,153 @@ def test_query_plans_use_indexes(conn: sqlite3.Connection) -> None:
         assert "SCAN messages" not in text.replace("SCAN messages USING", ""), (name, text)
         assert "SCAN chats" not in text.replace("SCAN chats USING", ""), (name, text)
         assert "TEMP B-TREE" not in text, (name, text)
+
+
+# --- autoría, borrados, límites, redacción ----------------------------------------------
+
+
+def _row(conn: sqlite3.Connection, wa_id: str = "1") -> sqlite3.Row:
+    r: sqlite3.Row = conn.execute(
+        "SELECT * FROM messages WHERE chat_jid = ? AND wa_id = ?", (CHAT, wa_id)
+    ).fetchone()
+    return r
+
+
+def test_upsert_collision_other_author_not_applied(conn: sqlite3.Connection) -> None:
+    first = repo.upsert_message(conn, MessageIn(CHAT, "1", 1, body="orig", sender_jid="a"))
+    res = repo.upsert_message(
+        conn, MessageIn(CHAT, "1", 2, body="hack", sender_jid="b", status="read")
+    )
+    assert (res.applied, res.inserted, res.id) == (False, False, first.id)
+    r = _row(conn)
+    assert (r["body"], r["sender_jid"], r["status"]) == ("orig", "a", "sent")
+    res2 = repo.upsert_message(conn, MessageIn(CHAT, "1", 2, body="hack", from_me=True))
+    assert res2.applied is False
+    assert _row(conn)["body"] == "orig"
+    assert _count(conn, "messages") == 1
+
+
+def test_edit_delete_wrong_author_not_applied(conn: sqlite3.Connection) -> None:
+    repo.upsert_message(conn, MessageIn(CHAT, "1", 1, body="x", sender_jid="a"))
+    assert repo.apply_edit(conn, CHAT, "1", "y", 5, sender_jid="b") is False
+    assert repo.apply_edit(conn, CHAT, "1", "y", 5, sender_jid="a", from_me=True) is False
+    assert repo.apply_delete(conn, CHAT, "1", 6, sender_jid="b") is False
+    assert repo.apply_delete(conn, CHAT, "1", 6, sender_jid="a", from_me=True) is False
+    r = _row(conn)
+    assert (r["body"], r["edited_at"], r["deleted_at"]) == ("x", None, None)
+    assert repo.apply_edit(conn, CHAT, "1", "y", 5, sender_jid="a") is True
+
+
+def test_incoming_null_sender_never_matches(conn: sqlite3.Connection) -> None:
+    repo.upsert_message(conn, MessageIn(CHAT, "1", 1, body="x"))
+    assert repo.apply_edit(conn, CHAT, "1", "y", 5, sender_jid=None) is False
+    assert repo.apply_edit(conn, CHAT, "1", "y", 5, sender_jid="a") is False
+    assert repo.apply_delete(conn, CHAT, "1", 6, sender_jid=None) is False
+    assert repo.apply_delete(conn, CHAT, "1", 6, sender_jid="a") is False
+    assert _row(conn)["body"] == "x"
+
+
+def test_from_me_edit_delete_ignores_sender(conn: sqlite3.Connection) -> None:
+    repo.upsert_message(conn, MessageIn(CHAT, "1", 1, body="x", from_me=True))
+    assert repo.apply_edit(conn, CHAT, "1", "y", 5, sender_jid=None, from_me=True) is True
+    assert repo.apply_delete(conn, CHAT, "1", 6, sender_jid=None, from_me=True) is True
+
+
+def test_delete_clears_body_and_quoted_and_survives_upsert(conn: sqlite3.Connection) -> None:
+    repo.upsert_message(conn, MessageIn(CHAT, "1", 1, body="x", sender_jid="a", quoted_wa_id="q"))
+    assert repo.apply_delete(conn, CHAT, "1", 6, sender_jid="a") is True
+    r = _row(conn)
+    assert (r["body"], r["quoted_wa_id"], r["deleted_at"]) == (None, None, 6)
+    res = repo.upsert_message(
+        conn, MessageIn(CHAT, "1", 1, body="back", sender_jid="a", quoted_wa_id="z")
+    )
+    assert res.applied is True
+    r = _row(conn)
+    assert (r["body"], r["quoted_wa_id"]) == (None, None)
+    assert _hits(conn, "back") == []
+
+
+def test_reads_hide_deleted_body(conn: sqlite3.Connection) -> None:
+    repo.upsert_message(conn, MessageIn(CHAT, "1", 1, body="x", sender_jid="a", quoted_wa_id="q"))
+    # simula fila borrada con datos residuales para verificar que las lecturas los ocultan
+    conn.execute("UPDATE messages SET deleted_at = 5")
+    for m in (*repo.last_messages(conn, CHAT), *repo.messages_since(conn, 0)):
+        assert (m.body, m.quoted_wa_id, m.deleted_at) == (None, None, 5)
+
+
+def test_limits_clamped(conn: sqlite3.Connection) -> None:
+    assert repo.MAX_LIMIT == 1000
+    with conn:
+        conn.execute("BEGIN")
+        repo.upsert_chat(conn, CHAT)
+        conn.executemany(
+            "INSERT INTO messages (chat_jid, wa_id, ts, body) VALUES (?, ?, ?, 'hola')",
+            [(CHAT, str(i), i) for i in range(repo.MAX_LIMIT + 50)],
+        )
+        conn.execute("COMMIT")
+    assert len(repo.last_messages(conn, CHAT, 10**9)) == repo.MAX_LIMIT
+    assert len(repo.messages_since(conn, -1, 10**9)) == repo.MAX_LIMIT
+    assert len(repo.search(conn, "hola", 10**9)) == repo.MAX_LIMIT
+    assert len(repo.last_messages(conn, CHAT, 0)) == 1
+    assert len(repo.last_messages(conn, CHAT, -5)) == 1
+    assert len(repo.messages_since(conn, -1, 0)) == 1
+    assert len(repo.search(conn, "hola", -1)) == 1
+    assert len(repo.list_chats(conn, 0)) == 1
+
+
+def test_body_truncated(conn: sqlite3.Connection) -> None:
+    repo.upsert_message(conn, MessageIn(CHAT, "1", 1, body="a" * (repo.MAX_BODY + 10)))
+    assert len(_row(conn)["body"]) == repo.MAX_BODY
+    assert repo.apply_edit(conn, CHAT, "1", "b" * (repo.MAX_BODY + 10), 2, sender_jid=None) is False
+    repo.upsert_message(conn, MessageIn(CHAT, "2", 1, body="x", from_me=True))
+    assert repo.apply_edit(
+        conn, CHAT, "2", "b" * (repo.MAX_BODY + 10), 2, sender_jid=None, from_me=True
+    )
+    assert len(_row(conn, "2")["body"]) == repo.MAX_BODY
+
+
+def test_fts_query_token_cap() -> None:
+    q = repo.fts_query(" ".join(f"t{i}" for i in range(repo.MAX_FTS_TOKENS + 10)))
+    assert len(q.split(" ")) == repo.MAX_FTS_TOKENS
+    assert q.endswith('"*')
+    assert repo.fts_query("") == ""
+
+
+def test_outbox_done_clears_payload_keeps_row(conn: sqlite3.Connection) -> None:
+    repo.outbox_put(conn, "r1", CHAT, {"text": "secreto"}, created_at=1)
+    repo.outbox_next(conn)
+    assert repo.outbox_done(conn, "r1") is True
+    row = conn.execute("SELECT state, payload FROM outbox WHERE request_id = 'r1'").fetchone()
+    assert (row["state"], json.loads(row["payload"])) == ("done", {})
+    assert row["payload"] == "{}"
+    assert repo.outbox_put(conn, "r1", CHAT, {"text": "otra vez"}, created_at=2) is False
+    assert repo.outbox_next(conn) is None
+    assert _count(conn, "outbox") == 1
+
+
+def test_purge_stuck_sending(conn: sqlite3.Connection) -> None:
+    now = 10 * DAY
+    stuck = now - repo.STUCK_SENDING_SECONDS - 1
+    repo.outbox_put(conn, "stuck", CHAT, {"a": 1}, created_at=stuck)
+    repo.outbox_put(conn, "recent", CHAT, {"a": 1}, created_at=now - 10)
+    assert repo.outbox_next(conn) is not None
+    assert repo.outbox_next(conn) is not None
+    res = repo.purge_older_than(conn, 365, now=now)
+    assert res.outbox == 1
+    left = {r[0] for r in conn.execute("SELECT request_id FROM outbox")}
+    assert left == {"recent"}
+
+
+def test_error_redaction(conn: sqlite3.Connection) -> None:
+    raw = "fallo con 5215512345678@s.whatsapp.net y 123456789 pero 12345 ok"
+    repo.upsert_message(conn, MessageIn(CHAT, "1", 1, from_me=True, status="pending"))
+    assert repo.update_status(conn, CHAT, "1", "failed", raw) is True
+    err = _row(conn)["error"]
+    assert "5215512345678" not in err
+    assert "123456789" not in err
+    assert "@s.whatsapp.net" not in err
+    assert "12345 ok" in err
+    repo.outbox_put(conn, "r1", CHAT, {}, created_at=1)
+    assert repo.outbox_fail(conn, "r1", raw) is True
+    oerr = conn.execute("SELECT error FROM outbox").fetchone()[0]
+    assert oerr == err
