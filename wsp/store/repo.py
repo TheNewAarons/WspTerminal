@@ -25,6 +25,10 @@ MAX_LIMIT = 1000
 MAX_BODY = 65_536
 """Longitud máxima (caracteres) de body; el exceso se trunca al escribir."""
 MAX_FTS_TOKENS = 16
+MAX_FTS_TOKEN_LEN = 64
+"""Longitud máxima de cada token FTS; un token recortado se busca como prefijo."""
+MAX_PAYLOAD_BYTES = 65_536
+"""Tamaño máximo (bytes UTF-8 del JSON) del payload de outbox; el exceso se rechaza."""
 STUCK_SENDING_SECONDS = 86_400
 """Outbox en 'sending' más antiguo que esto (por created_at) se considera atascado y se purga."""
 
@@ -101,6 +105,7 @@ class OutboxItem:
     attempts: int
     error: str | None
     created_at: int
+    wa_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +113,8 @@ class PurgeResult:
     messages: int
     reactions: int
     outbox: int
+    chats: int = 0
+    contacts: int = 0
 
 
 def _msg(row: sqlite3.Row) -> MessageRow:
@@ -150,6 +157,7 @@ def _outbox(row: sqlite3.Row) -> OutboxItem:
         attempts=row["attempts"],
         error=row["error"],
         created_at=row["created_at"],
+        wa_id=row["wa_id"],
     )
 
 
@@ -263,7 +271,7 @@ _UPSERT_MESSAGE = (
     "status, error) "
     "VALUES (:chat_jid, :wa_id, :sender_jid, :from_me, :ts, COALESCE(:kind, 'text'), :body, "
     ":quoted_wa_id, COALESCE(:status, 'sent'), :error) "
-    "ON CONFLICT (chat_jid, wa_id) DO UPDATE SET "
+    "ON CONFLICT (chat_jid, wa_id, COALESCE(sender_jid, '')) DO UPDATE SET "
     "sender_jid = COALESCE(:sender_jid, sender_jid), "
     "kind = COALESCE(:kind, kind), "
     "body = CASE WHEN deleted_at IS NOT NULL THEN body ELSE COALESCE(:body, body) END, "
@@ -286,18 +294,29 @@ _UPSERT_MESSAGE = (
 def upsert_message(
     conn: sqlite3.Connection, msg: MessageIn, *, count_unread: bool = True
 ) -> UpsertResult:
-    """Inserta o fusiona un mensaje (idempotente por chat_jid+wa_id).
+    """Inserta o fusiona un mensaje (idempotente por chat_jid+wa_id+autor).
 
-    No degrada el estado ni pisa campos con NULL. Solo fusiona si el existente coincide en
-    from_me y sender_jid (sender_jid=None en la entrada = sin cambio); si no, no toca nada y
-    devuelve applied=False. Nunca modifica body/quoted de un mensaje borrado. Crea el chat si
-    falta y actualiza last_message_at; suma unread_count solo en inserciones entrantes si
-    count_unread.
+    La unicidad es (chat_jid, wa_id, COALESCE(sender_jid, '')): el mismo wa_id con otro autor es
+    otra fila. sender_jid=None en la entrada se fusiona con la única fila existente de ese
+    (chat, wa_id); si hay varias es ambiguo y devuelve applied=False. No degrada el estado ni
+    pisa campos con NULL. Si el existente difiere en from_me no toca nada (applied=False).
+    Nunca modifica body/quoted de un mensaje borrado. Crea el chat si falta y actualiza
+    last_message_at; suma unread_count solo en inserciones entrantes si count_unread.
     """
+    sender = msg.sender_jid
+    if sender is None:
+        known = conn.execute(
+            "SELECT id, sender_jid FROM messages WHERE chat_jid = ? AND wa_id = ? LIMIT 2",
+            (msg.chat_jid, msg.wa_id),
+        ).fetchall()
+        if len(known) > 1:
+            return UpsertResult(id=int(known[0]["id"]), inserted=False, applied=False)
+        if known:
+            sender = known[0]["sender_jid"]
     params = {
         "chat_jid": msg.chat_jid,
         "wa_id": msg.wa_id,
-        "sender_jid": msg.sender_jid,
+        "sender_jid": sender,
         "from_me": int(msg.from_me),
         "ts": msg.ts,
         "kind": msg.kind,
@@ -308,7 +327,9 @@ def upsert_message(
     }
     with transaction(conn):
         existed = conn.execute(
-            "SELECT 1 FROM messages WHERE chat_jid = ? AND wa_id = ?", (msg.chat_jid, msg.wa_id)
+            "SELECT 1 FROM messages "
+            "WHERE chat_jid = ? AND wa_id = ? AND COALESCE(sender_jid, '') = COALESCE(?, '')",
+            (msg.chat_jid, msg.wa_id, sender),
         ).fetchone()
         conn.execute(
             "INSERT INTO chats (jid, kind) VALUES (?, ?) ON CONFLICT (jid) DO NOTHING",
@@ -317,8 +338,9 @@ def upsert_message(
         row = conn.execute(_UPSERT_MESSAGE, params).fetchone()
         if row is None:
             prior = conn.execute(
-                "SELECT id FROM messages WHERE chat_jid = ? AND wa_id = ?",
-                (msg.chat_jid, msg.wa_id),
+                "SELECT id FROM messages "
+                "WHERE chat_jid = ? AND wa_id = ? AND COALESCE(sender_jid, '') = COALESCE(?, '')",
+                (msg.chat_jid, msg.wa_id, sender),
             ).fetchone()
             return UpsertResult(id=int(prior["id"]), inserted=False, applied=False)
         inserted = existed is None
@@ -396,7 +418,20 @@ def apply_delete(
     """Borrado lógico solo si el autor coincide: deleted_at, body=NULL, quoted_wa_id=NULL.
 
     El trigger AU limpia el índice FTS. Conserva la primera marca si ya estaba borrado.
+    También elimina las reacciones del mensaje.
     """
+    with transaction(conn):
+        return _apply_delete(conn, chat_jid, wa_id, deleted_at, sender_jid, from_me)
+
+
+def _apply_delete(
+    conn: sqlite3.Connection,
+    chat_jid: str,
+    wa_id: str,
+    deleted_at: int,
+    sender_jid: str | None,
+    from_me: bool,
+) -> bool:
     cur = conn.execute(
         "UPDATE messages SET deleted_at = :deleted_at, body = NULL, quoted_wa_id = NULL "  # noqa: S608
         "WHERE chat_jid = :chat_jid AND wa_id = :wa_id AND deleted_at IS NULL " + _AUTHOR,
@@ -408,6 +443,8 @@ def apply_delete(
             "sender_jid": sender_jid,
         },
     )
+    if cur.rowcount > 0:
+        conn.execute("DELETE FROM reactions WHERE chat_jid = ? AND wa_id = ?", (chat_jid, wa_id))
     return cur.rowcount > 0
 
 
@@ -449,12 +486,19 @@ def last_messages(conn: sqlite3.Connection, chat_jid: str, n: int = 50) -> list[
 
 
 def fts_query(text: str) -> str:
-    """Texto libre a consulta FTS5 segura: máx. 16 tokens citados, AND, prefijo al final."""
+    """Texto libre a consulta FTS5 segura: máx. 16 tokens citados de ≤64 chars, AND.
+
+    El último token es prefijo; uno recortado por longitud también (para seguir coincidiendo).
+    """
     tokens = _TOKEN_RE.findall(text)[:MAX_FTS_TOKENS]
     if not tokens:
         return ""
-    parts = ['"' + t + '"' for t in tokens]
-    parts[-1] += "*"
+    parts = [
+        '"' + t[:MAX_FTS_TOKEN_LEN] + '"' + ("*" if len(t) > MAX_FTS_TOKEN_LEN else "")
+        for t in tokens
+    ]
+    if not parts[-1].endswith("*"):
+        parts[-1] += "*"
     return " ".join(parts)
 
 
@@ -483,14 +527,20 @@ def outbox_put(
     payload: Mapping[str, Any],
     created_at: int | None = None,
 ) -> bool:
-    """Encola un envío; idempotente por request_id. True si se insertó."""
+    """Encola un envío; idempotente por request_id. True si se insertó.
+
+    Lanza ValueError si el payload serializado supera MAX_PAYLOAD_BYTES.
+    """
+    text = json.dumps(payload, ensure_ascii=False)
+    if len(text.encode("utf-8")) > MAX_PAYLOAD_BYTES:
+        raise ValueError("payload de outbox demasiado grande")
     cur = conn.execute(
         "INSERT INTO outbox (request_id, chat_jid, payload, created_at) VALUES (?, ?, ?, ?) "
         "ON CONFLICT (request_id) DO NOTHING",
         (
             request_id,
             chat_jid,
-            json.dumps(payload, ensure_ascii=False),
+            text,
             int(time.time()) if created_at is None else created_at,
         ),
     )
@@ -509,31 +559,101 @@ def outbox_next(conn: sqlite3.Connection) -> OutboxItem | None:
         claimed = conn.execute(
             "UPDATE outbox SET state = 'sending', attempts = attempts + 1 "
             "WHERE request_id = ? RETURNING request_id, chat_jid, payload, state, attempts, "
-            "error, created_at",
+            "error, created_at, wa_id",
             (row["request_id"],),
         ).fetchone()
     return _outbox(claimed)
 
 
-def outbox_done(conn: sqlite3.Connection, request_id: str) -> bool:
-    """Marca done y vacía el payload (texto del usuario); la fila queda para idempotencia."""
-    cur = conn.execute(
-        "UPDATE outbox SET state = 'done', error = NULL, payload = '{}' WHERE request_id = ?",
+def outbox_get(conn: sqlite3.Connection, request_id: str) -> OutboxItem | None:
+    """Devuelve el elemento por request_id (cualquier estado) o None."""
+    row = conn.execute(
+        "SELECT request_id, chat_jid, payload, state, attempts, error, created_at, wa_id "
+        "FROM outbox WHERE request_id = ?",
         (request_id,),
+    ).fetchone()
+    return None if row is None else _outbox(row)
+
+
+def outbox_done(conn: sqlite3.Connection, request_id: str, wa_id: str | None = None) -> bool:
+    """Marca done, guarda el wa_id real y vacía el payload; la fila queda para idempotencia."""
+    cur = conn.execute(
+        "UPDATE outbox SET state = 'done', error = NULL, payload = '{}', "
+        "wa_id = COALESCE(?, wa_id) WHERE request_id = ?",
+        (wa_id, request_id),
     )
     return cur.rowcount > 0
+
+
+def outbox_recover(conn: sqlite3.Connection) -> int:
+    """Al arrancar: 'sending' pasa a 'failed' (error 'interrupted'); no se reenvía.
+
+    El envío pudo haber salido antes de la caída. Vacía el payload. Devuelve cuántas filas.
+    """
+    cur = conn.execute(
+        "UPDATE outbox SET state = 'failed', error = 'interrupted', payload = '{}' "
+        "WHERE state = 'sending'"
+    )
+    return cur.rowcount
 
 
 def outbox_fail(
     conn: sqlite3.Connection, request_id: str, error: str, *, retry: bool = False
 ) -> bool:
-    """Registra el error; retry=True devuelve el elemento a queued, si no queda failed."""
+    """Registra el error; retry=True devuelve el elemento a queued.
+
+    Si no, queda failed (definitivo) y se vacía el payload ('{}').
+    """
     cur = conn.execute(
-        "UPDATE outbox SET state = CASE WHEN ? THEN 'queued' ELSE 'failed' END, error = ? "
-        "WHERE request_id = ?",
-        (int(retry), _clip(error), request_id),
+        "UPDATE outbox SET state = CASE WHEN ? THEN 'queued' ELSE 'failed' END, error = ?, "
+        "payload = CASE WHEN ? THEN payload ELSE '{}' END WHERE request_id = ?",
+        (int(retry), _clip(error), int(retry), request_id),
     )
     return cur.rowcount > 0
+
+
+# --- reconciliación de ids y FTS ---------------------------------------------------------
+
+_RANK = "' failed pending sent delivered read '"
+
+
+def rebind_wa_id(conn: sqlite3.Connection, chat_jid: str, old_wa_id: str, new_wa_id: str) -> bool:
+    """Renombra el mensaje placeholder (propio) al wa_id real asignado por WhatsApp.
+
+    Si ya existe una fila propia con new_wa_id (el eco llegó antes), borra el placeholder y
+    conserva la existente con el estado más avanzado de ambas. Idempotente: False si no hay
+    placeholder (ya reasignado) o si old == new.
+    """
+    if old_wa_id == new_wa_id:
+        return False
+    with transaction(conn):
+        old = conn.execute(
+            "SELECT id, status FROM messages WHERE chat_jid = ? AND wa_id = ? AND from_me = 1",
+            (chat_jid, old_wa_id),
+        ).fetchone()
+        if old is None:
+            return False
+        keep = conn.execute(
+            "SELECT id FROM messages WHERE chat_jid = ? AND wa_id = ? AND from_me = 1",
+            (chat_jid, new_wa_id),
+        ).fetchone()
+        if keep is None:
+            cur = conn.execute(
+                "UPDATE OR IGNORE messages SET wa_id = ? WHERE id = ?", (new_wa_id, old["id"])
+            )
+            return cur.rowcount > 0
+        conn.execute(
+            "UPDATE messages SET status = ? WHERE id = ? AND "  # noqa: S608
+            f"instr({_RANK}, ' ' || ? || ' ') > instr({_RANK}, ' ' || status || ' ')",
+            (old["status"], keep["id"], old["status"]),
+        )
+        conn.execute("DELETE FROM messages WHERE id = ?", (old["id"],))
+    return True
+
+
+def fts_optimize(conn: sqlite3.Connection) -> None:
+    """Compacta el índice FTS5 (merge de segmentos)."""
+    conn.execute("INSERT INTO messages_fts (messages_fts) VALUES ('optimize')")
 
 
 # --- meta y retención -------------------------------------------------------------------
@@ -553,10 +673,13 @@ def meta_set(conn: sqlite3.Connection, key: str, value: str) -> None:
 
 
 def purge_older_than(conn: sqlite3.Connection, days: int, now: int | None = None) -> PurgeResult:
-    """Borra mensajes anteriores a `days`, reacciones huérfanas y outbox terminado o atascado.
+    """Borra mensajes anteriores a `days` y deja el almacén sin huérfanos.
 
-    Outbox: done/failed anteriores al corte y 'sending' con más de STUCK_SENDING_SECONDS.
-    El FTS se mantiene por triggers; con secure_delete=ON (open_write) las páginas se
+    Reacciones sin mensaje; chats cuyo último mensaje es anterior al corte, sin mensajes, sin
+    outbox pendiente y sin fijar ni silenciar; contactos sin alias, sin referencias y
+    actualizados antes del corte. Outbox: done/failed anteriores al corte se borran; 'sending'
+    con más de STUCK_SENDING_SECONDS se marca 'failed' (error 'stuck', payload vacío) en vez de
+    borrarse. El FTS se mantiene por triggers; con secure_delete=ON (open_write) las páginas se
     sobrescriben. Tras purgar (fuera de transacción) hace wal_checkpoint(TRUNCATE) y FTS
     'optimize'. El VACUUM periódico queda a cargo del daemon (`db.vacuum`).
     """
@@ -571,12 +694,31 @@ def purge_older_than(conn: sqlite3.Connection, days: int, now: int | None = None
             "SELECT 1 FROM messages m "
             "WHERE m.chat_jid = reactions.chat_jid AND m.wa_id = reactions.wa_id)"
         ).rowcount
+        conn.execute(
+            "UPDATE outbox SET state = 'failed', error = 'stuck', payload = '{}' "
+            "WHERE state = 'sending' AND created_at < ?",
+            (current - STUCK_SENDING_SECONDS,),
+        )
         outbox = conn.execute(
-            "DELETE FROM outbox WHERE (state IN ('done', 'failed') AND created_at < ?) "
-            "OR (state = 'sending' AND created_at < ?)",
-            (cutoff, current - STUCK_SENDING_SECONDS),
+            "DELETE FROM outbox WHERE state IN ('done', 'failed') AND created_at < ?",
+            (cutoff,),
+        ).rowcount
+        chats = conn.execute(
+            "DELETE FROM chats WHERE last_message_at < ? AND pinned = 0 AND muted_until <= ? "
+            "AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.chat_jid = chats.jid) "
+            "AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.chat_jid = chats.jid)",
+            (cutoff, current),
+        ).rowcount
+        contacts = conn.execute(
+            "DELETE FROM contacts WHERE alias IS NULL AND updated_at < ? "
+            "AND NOT EXISTS (SELECT 1 FROM chats c WHERE c.jid = contacts.jid) "
+            "AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.sender_jid = contacts.jid) "
+            "AND NOT EXISTS (SELECT 1 FROM reactions r WHERE r.sender_jid = contacts.jid)",
+            (cutoff,),
         ).rowcount
     if not conn.in_transaction:
-        conn.execute("INSERT INTO messages_fts (messages_fts) VALUES ('optimize')")
+        fts_optimize(conn)
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
-    return PurgeResult(messages=msgs, reactions=reacts, outbox=outbox)
+    return PurgeResult(
+        messages=msgs, reactions=reacts, outbox=outbox, chats=chats, contacts=contacts
+    )

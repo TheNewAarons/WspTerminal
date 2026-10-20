@@ -86,3 +86,46 @@ def test_migrate_refuses_open_transaction(db_path: Path) -> None:
         c.execute("ROLLBACK")
     finally:
         c.close()
+
+
+def test_0003_preserves_data_fts_and_triggers(db_path: Path) -> None:
+    c = db.open_write(db_path)
+    try:
+        for mig in migrate.load_migrations()[:2]:
+            for stmt in migrate._statements(mig.sql):
+                c.execute(stmt)
+        c.execute("PRAGMA user_version = 2")
+        c.execute("INSERT INTO chats (jid, kind) VALUES ('c@s.whatsapp.net', 'direct')")
+        c.execute(
+            "INSERT INTO messages (id, chat_jid, wa_id, ts, body) "
+            "VALUES (7, 'c@s.whatsapp.net', 'w1', 5, 'manzana roja')"
+        )
+        assert migrate.migrate(c) == migrate.latest_version()
+        row = c.execute("SELECT id, wa_id, body FROM messages").fetchone()
+        assert tuple(row) == (7, "w1", "manzana roja")
+        hit = c.execute("SELECT rowid FROM messages_fts WHERE messages_fts MATCH 'manzana'")
+        assert [r[0] for r in hit] == [7]
+        # Triggers vivos: insertar y borrar mantiene el índice coherente.
+        c.execute(
+            "INSERT INTO messages (chat_jid, wa_id, ts, body) "
+            "VALUES ('c@s.whatsapp.net', 'w2', 6, 'pera verde')"
+        )
+        assert (
+            c.execute(
+                "SELECT count(*) FROM messages_fts WHERE messages_fts MATCH 'pera'"
+            ).fetchone()[0]
+            == 1
+        )
+        c.execute("DELETE FROM messages WHERE wa_id = 'w2'")
+        assert (
+            c.execute(
+                "SELECT count(*) FROM messages_fts WHERE messages_fts MATCH 'pera'"
+            ).fetchone()[0]
+            == 0
+        )
+        assert c.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert c.execute("PRAGMA foreign_key_check").fetchall() == []
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(outbox)")}
+        assert "wa_id" in cols
+    finally:
+        c.close()

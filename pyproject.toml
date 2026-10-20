@@ -48,6 +48,10 @@ select = ["E", "F", "I", "B", "UP", "ASYNC", "S"]
 strict = true
 python_version = "3.12"
 
+[[tool.mypy.overrides]]
+module = ["neonize", "neonize.*", "qrcode", "qrcode.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
