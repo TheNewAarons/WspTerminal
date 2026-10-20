@@ -2,7 +2,7 @@
 
 Estados: `[ ]` pendiente · `[~]` en curso · `[x]` hecho.
 Ids: `F<fase>.<n>`. Anti-bucle: 2 fallos consecutivos en una tarea → revertir y replantear aquí.
-Ramas: F0 `feat/f0-bootstrap`; resto `phase-N-<tema>`. Un PR por fase (`gh pr create`), sin CI.
+Ramas: F0 `feat/f0-bootstrap`; F3 `feat/f3-daemon`; resto `phase-N-<tema>`. Un PR por fase (`gh pr create`), sin CI.
 
 ## Referencias
 
@@ -80,9 +80,9 @@ Ejecutar antes de F3.4 (persistencia). Un solo archivo `wsp/store/migrations/000
 
 ---
 
-## Fase 3 — Daemon neonize (rama `phase-3-daemon`)
+## Fase 3 — Daemon neonize (rama `feat/f3-daemon`)
 
-- [ ] **F3.1** Esqueleto `wsp.daemon.main:run`: ciclo de vida asyncio, señales, `config.toml`, structlog sin contenido de mensajes ni números completos (solo últimos 4 dígitos), `umask 0o077` al arrancar, y evaluar riesgo SSRF de linkpreview/requests transitivas de neonize (no procesar URLs de mensajes) · Agente: orquestador · Deps: F2.10 · Aceptación: `uv run pytest tests/daemon/test_lifecycle.py tests/daemon/test_log_redaction.py -q`
+- [~] **F3.1** Esqueleto `wsp.daemon.main:run`: ciclo de vida asyncio, señales, `config.toml`, structlog sin contenido de mensajes ni números completos (solo últimos 4 dígitos), `umask 0o077` al arrancar, y evaluar riesgo SSRF de linkpreview/requests transitivas de neonize (no procesar URLs de mensajes) · Agente: orquestador · Deps: F2.10 · Aceptación: `uv run pytest tests/daemon/test_lifecycle.py tests/daemon/test_log_redaction.py -q`
 - [ ] **F3.2** Pairing `wsp pair [--phone]` (qrcode en terminal / código por teléfono); sesión 600; secretos vía keyring · Agente: orquestador · Deps: F3.1 · Aceptación: `uv run pytest tests/daemon/test_pairing.py -q`
 - [ ] **F3.3** Puente de eventos neonize → modelos de protocolo · Agente: orquestador · Deps: F3.1, F2.1 · Aceptación: `uv run pytest tests/daemon/test_bridge.py -q`
 - [ ] **F3.4** Persistencia al store (único escritor), upserts idempotentes, estados ✓ ✓✓ ✗(motivo) · Agente: orquestador · Deps: F3.3, F1.6 · Aceptación: `uv run pytest tests/daemon/test_persistence.py -q`
@@ -107,6 +107,16 @@ Pendientes trasladados de Fase 2 (security-reviewer):
 
 - [ ] **F3.18** (M4) `flock` sobre lockfile para evitar dos daemons en carrera en `_remove_stale` del socket (decidir en F3 o F4.1/F4.2) · Agente: orquestador · Deps: F3.1 · Aceptación: `uv run pytest tests/daemon/test_socket_server.py -q` (segundo arranque falla sin borrar el socket vivo)
 - [ ] **F3.19** (B2) Revisar `umask` global dentro de `Server.start()` (efecto lateral en el proceso); preferir `umask 0o077` de F3.1 + `chmod` explícito del socket · Agente: orquestador · Deps: F3.1 · Aceptación: test de que `Server.start()` no altera el umask del proceso y el socket queda 600
+
+Módulos del daemon (desglose de implementación):
+
+- [~] **F3.20** Migración 0003 + API outbox (cubre F1.14–F1.20) · Agente: database-agent (en curso) · Deps: F1.13 · Aceptación: `uv run pytest tests/store -q`
+- [ ] **F3.21** `wsp/daemon/session.py`: wrapper async sobre neonize con `flock` de instancia única (segundo arranque sale con exit 2) · Agente: orquestador · Deps: F3.1 · Aceptación: `uv run pytest tests/daemon/test_session.py -q`
+- [ ] **F3.22** `wsp/daemon/events.py`: traducción de eventos (texto, extendidos, respuestas, medios solo metadatos, reacciones, ediciones, revocaciones, recibos, presencia, grupos/contactos, history sync); persistir y luego emitir; eventos no traducibles se loguean solo por tipo · Agente: orquestador · Deps: F3.21, F2.1, F1.6 · Aceptación: `uv run pytest tests/daemon/test_events.py -q`
+- [ ] **F3.23** `wsp/daemon/outbox.py`: worker con token bucket configurable, 3 reintentos con backoff, idempotencia por `request_id` · Agente: orquestador · Deps: F3.20, F3.21, F2.2 · Aceptación: `uv run pytest tests/daemon/test_outbox.py -q`
+- [ ] **F3.24** `wsp/daemon/config.py` + `wsp/daemon/logsetup.py`: structlog JSON en `state/wspd.log`, rotación 5 MB×3, números enmascarados (`+56 9 ****1234`) · Agente: orquestador · Deps: F3.1 · Aceptación: `uv run pytest tests/daemon/test_log_redaction.py -q`
+- [ ] **F3.25** `wspd` main con cierre limpio por SIGTERM/SIGINT · Agente: orquestador · Deps: F3.21–F3.24 · Aceptación: `uv run pytest tests/daemon/test_lifecycle.py -q`
+- [ ] **F3.26** `wsp pair` en cli usando `daemon/session.py` · Agente: orquestador · Deps: F3.21, F3.2 · Aceptación: `uv run pytest tests/daemon/test_pairing.py -q`
 
 ---
 
@@ -177,3 +187,4 @@ Pendientes trasladados de Fase 2 (security-reviewer):
 2026-10-20 · F2 · Fase 2 cerrada (cead574, b0219d4, de79c26): 200 tests, ruff/mypy limpios, security-reviewer sin bloqueantes, fixes aplicados; idempotencia por request_id hecha. F2.9 (PR) pendiente.
 2026-10-20 · F2 · Diferidos: M3 cursor por rowid -> F5.14 (junto a F5.13); M4 flock anti doble daemon -> F3.18; B2 umask en Server.start() -> F3.19.
 2026-10-20 · F0 · `.claude/settings.json` y `.claude/hooks/*.sh` siguen con el stack viejo (el sandbox impide editarlos); pendiente actualizarlos fuera del sandbox.
+2026-10-20 · F3 · F3 iniciada en feat/f3-daemon; libmagic ausente en el equipo: neonize no importa hasta `brew install libmagic` (necesario solo para la prueba manual; tests usan cliente falso).
