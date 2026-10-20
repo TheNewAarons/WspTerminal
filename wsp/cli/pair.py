@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import os
 import re
 import sys
 from collections.abc import Callable
@@ -77,6 +78,7 @@ def run_pair(
     if phone is not None and not _PHONE_RE.fullmatch(phone):
         sys.stderr.write("wsp: --phone debe ser un número con código de país (solo dígitos)\n")
         return 1
+    os.umask(0o077)  # whatsmeow crea -wal/-shm con el umask del proceso
     lock = InstanceLock()
     try:
         lock.acquire()
@@ -85,8 +87,8 @@ def run_pair(
         return EXIT_ALREADY_RUNNING
     try:
         ok = asyncio.run(pair(client_factory(), out, phone.lstrip("+") if phone else None))
-        secure_session_files()
     finally:
+        secure_session_files()
         lock.release()
     if not ok:
         sys.stderr.write("wsp: tiempo agotado sin vincular\n")

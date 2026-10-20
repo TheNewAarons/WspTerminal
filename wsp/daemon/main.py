@@ -32,6 +32,7 @@ log = logging.getLogger(__name__)
 LOG_NAME: Final = "wspd.log"
 MAINTENANCE_INTERVAL: Final = 24 * 3600.0
 SHUTDOWN_TIMEOUT: Final = 10.0
+_STOP_SIGNALS: Final = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 
 ClientFactory = Callable[[], WaClient]
 
@@ -68,7 +69,7 @@ async def serve(
     """Levanta DB, socket, outbox y sesión; al recibir `stop` (o logged_out) cierra limpio."""
     stop = stop or asyncio.Event()
     loop = asyncio.get_running_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT):
+    for sig in _STOP_SIGNALS:
         loop.add_signal_handler(sig, stop.set)
 
     conn = db.open_write()
@@ -105,18 +106,22 @@ async def serve(
             log.warning("sesión terminada state=%s", session.state)
     finally:
         log.info("apagando")
-        for sig in (signal.SIGTERM, signal.SIGINT):
+        for sig in _STOP_SIGNALS:
             loop.remove_signal_handler(sig)
         if maint_task is not None:
             maint_task.cancel()
+        # Drenar outbox con la sesión viva; luego desconectar y cerrar el socket.
+        if outbox is not None:
+            with contextlib.suppress(Exception):
+                await outbox.stop(SHUTDOWN_TIMEOUT)
         if session is not None:
-            await session.stop()
+            with contextlib.suppress(Exception):
+                await session.stop()
         if session_task is not None:
             session_task.cancel()
-        if outbox is not None:
-            await outbox.stop(SHUTDOWN_TIMEOUT)
         if server is not None:
-            await server.stop()
+            with contextlib.suppress(Exception):
+                await server.stop()
         for t in (maint_task, session_task):
             if t is not None:
                 with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -135,7 +140,6 @@ def main() -> int:
     except ConfigError as e:
         sys.stderr.write(f"wspd: {e}\n")
         return 1
-    configure_logging(paths.state_dir() / LOG_NAME, cfg.log.level)
     lock = InstanceLock()
     try:
         lock.acquire()
@@ -143,6 +147,7 @@ def main() -> int:
         sys.stderr.write(f"wspd: {e}\n")
         return EXIT_ALREADY_RUNNING
     try:
+        configure_logging(paths.state_dir() / LOG_NAME, cfg.log.level)
         asyncio.run(serve(cfg))
     finally:
         lock.release()

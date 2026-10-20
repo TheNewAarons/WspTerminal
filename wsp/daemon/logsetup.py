@@ -83,6 +83,7 @@ def configure_logging(log_file: Path, level: str = "INFO") -> logging.Handler:
         structlog.contextvars.merge_contextvars,
         structlog.processors.add_log_level,
         structlog.processors.TimeStamper(fmt="iso", utc=True),
+        structlog.processors.format_exc_info,
         redact,
     ]
     handler = _PrivateRotatingHandler(

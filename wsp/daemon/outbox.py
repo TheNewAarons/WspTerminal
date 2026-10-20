@@ -212,7 +212,10 @@ class Outbox:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            await self._on_error(item, _error_code(e), type(e).__name__)
+            # Un timeout pudo haber enviado el mensaje: no se reintenta (evita duplicados).
+            await self._on_error(
+                item, _error_code(e), type(e).__name__, final=isinstance(e, TimeoutError)
+            )
             return
         self._on_sent(item, res.wa_id)
 
@@ -255,9 +258,11 @@ class Outbox:
             return
         self._emit(MessageStatus(chat_jid=chat, wa_id=real_id, status="sent"))
 
-    async def _on_error(self, item: repo.OutboxItem, code: str, exc_type: str) -> None:
+    async def _on_error(
+        self, item: repo.OutboxItem, code: str, exc_type: str, *, final: bool = False
+    ) -> None:
         log.warning("envío falló attempt=%d code=%s exc=%s", item.attempts, code, exc_type)
-        retry = item.attempts < self._cfg.max_attempts and not self._stopping
+        retry = not final and item.attempts < self._cfg.max_attempts and not self._stopping
         try:
             repo.outbox_fail(self._conn, item.request_id, code, retry=retry)
             if not retry:
@@ -339,6 +344,8 @@ class Commands:
                 }
                 return self._outbox.enqueue(rid, payload, cmd.chat_jid)
             case React():
+                if not self._exists(cmd.chat_jid, cmd.wa_id):
+                    raise CommandError("not_found", "mensaje desconocido")
                 payload = {
                     "kind": "react",
                     "wa_id": cmd.wa_id,
@@ -360,6 +367,12 @@ class Commands:
             case Mute():
                 repo.upsert_chat(conn, cmd.chat_jid, muted_until=cmd.until)
                 return {"muted_until": cmd.until}
+
+    def _exists(self, chat_jid: str, wa_id: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM messages WHERE chat_jid = ? AND wa_id = ? LIMIT 1", (chat_jid, wa_id)
+        ).fetchone()
+        return row is not None
 
     def _sender_of(self, chat_jid: str, wa_id: str) -> str | None:
         row = self._conn.execute(

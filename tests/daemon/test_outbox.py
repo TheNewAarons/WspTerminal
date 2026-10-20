@@ -158,17 +158,16 @@ async def test_retries_with_backoff_then_succeeds(rig: Rig) -> None:
 
 
 @pytest.mark.parametrize(
-    ("exc", "code"),
-    [(RuntimeError(SECRET), "send_failed"), (TimeoutError(SECRET), "send_timeout")],
+    ("exc", "code", "attempts"),
+    [(RuntimeError(SECRET), "send_failed", 3), (TimeoutError(SECRET), "send_timeout", 1)],
 )
-async def test_fails_after_max_attempts_with_stable_code(
-    rig: Rig, exc: Exception, code: str
-) -> None:
+async def test_fails_with_stable_code(rig: Rig, exc: Exception, code: str, attempts: int) -> None:
+    # Un timeout pudo enviar el mensaje: falla de inmediato, sin reintento (evita duplicados).
     rig.client.send_errors = [exc, exc, exc, exc]
     rig.outbox.enqueue("r1", {"kind": "text", "text": "hola"}, DIRECT_STR)
-    assert await rig.drain() == 3
-    assert len(rig.client.sent) == 3
-    assert rig.sleeps == [1.0, 2.0]
+    assert await rig.drain() == attempts
+    assert len(rig.client.sent) == attempts
+    assert rig.sleeps == [1.0, 2.0][: attempts - 1]
     row = rig.message("wsp:r1")
     assert row is not None and (row.status, row.error) == ("failed", code)
     last = rig.events[-1]
@@ -221,7 +220,18 @@ async def test_react_sends_reaction_and_persists(rig: Rig) -> None:
     assert len(rig.events) == n  # las reacciones no emiten message.status
 
 
+async def test_react_unknown_message_not_found(rig: Rig) -> None:
+    with pytest.raises(CommandError) as exc:
+        await rig.commands("r1", React(chat_jid=DIRECT_STR, wa_id="NOPE", emoji="👍"))
+    assert exc.value.code == "not_found"
+    assert repo.outbox_get(rig.conn, "r1") is None
+
+
 async def test_react_failure_does_not_touch_messages(rig: Rig) -> None:
+    repo.upsert_message(
+        rig.conn,
+        repo.MessageIn(chat_jid=DIRECT_STR, wa_id="Q1", ts=1, sender_jid=DIRECT_STR, body="x"),
+    )
     rig.client.send_errors = [RuntimeError(SECRET)] * 3
     await rig.commands("r1", React(chat_jid=DIRECT_STR, wa_id="Q1", emoji="👍"))
     await rig.drain()
