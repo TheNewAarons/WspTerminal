@@ -1,0 +1,69 @@
+import sqlite3
+import stat
+from pathlib import Path
+
+import pytest
+
+from wsp.store import db, migrate, repo
+
+
+def _mode(p: Path) -> int:
+    return stat.S_IMODE(p.stat().st_mode)
+
+
+def test_permissions_600(conn: sqlite3.Connection, db_path: Path) -> None:
+    repo.upsert_message(conn, repo.MessageIn("a@s.whatsapp.net", "1", 1, body="x"))
+    db.secure_files(db_path)
+    for suffix in ("", "-wal", "-shm"):
+        f = Path(str(db_path) + suffix)
+        assert f.exists(), suffix
+        assert _mode(f) == 0o600, suffix
+
+
+def test_pragmas(conn: sqlite3.Connection) -> None:
+    assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+
+
+def test_foreign_key_enforced(conn: sqlite3.Connection) -> None:
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("INSERT INTO messages (chat_jid, wa_id, ts) VALUES ('nochat', '1', 1)")
+
+
+def test_read_connection_rejects_writes(conn: sqlite3.Connection, db_path: Path) -> None:
+    repo.upsert_chat(conn, "a@s.whatsapp.net", title="A")
+    r = db.open_read(db_path)
+    try:
+        assert r.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+        assert len(repo.list_chats(r)) == 1
+        with pytest.raises(sqlite3.OperationalError):
+            r.execute("INSERT INTO meta (key, value) VALUES ('a', 'b')")
+        with pytest.raises(sqlite3.OperationalError):
+            repo.upsert_chat(r, "b@s.whatsapp.net")
+    finally:
+        r.close()
+
+
+def test_transaction_rollback_and_nested(conn: sqlite3.Connection) -> None:
+    with pytest.raises(RuntimeError), db.transaction(conn):
+        conn.execute("INSERT INTO meta (key, value) VALUES ('a', '1')")
+        raise RuntimeError("boom")
+    assert repo.meta_get(conn, "a") is None
+    with db.transaction(conn):
+        conn.execute("INSERT INTO meta (key, value) VALUES ('b', '1')")
+        with pytest.raises(RuntimeError), db.transaction(conn):
+            conn.execute("INSERT INTO meta (key, value) VALUES ('c', '1')")
+            raise RuntimeError("inner")
+    assert repo.meta_get(conn, "b") == "1"
+    assert repo.meta_get(conn, "c") is None
+
+
+def test_default_path_uses_wsp_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WSP_HOME", str(tmp_path / "home"))
+    c = db.open_write()
+    try:
+        assert migrate.migrate(c) == migrate.latest_version()
+    finally:
+        c.close()
+    assert any((tmp_path / "home").rglob("*.db"))
