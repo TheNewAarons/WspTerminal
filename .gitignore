@@ -40,3 +40,5 @@ secrets/
 .idea/
 .vscode/
 *.swp
+*.sock
+*.log

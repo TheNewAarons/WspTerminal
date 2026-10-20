@@ -4,10 +4,10 @@ version = "0.1.0"
 description = "Cliente de WhatsApp minimalista para la terminal de macOS"
 requires-python = ">=3.12"
 dependencies = [
-    "neonize",
+    "neonize>=0.5.2,<0.6",
     "pydantic>=2",
     "prompt_toolkit>=3",
-    "keyring",
+    "keyring>=25",
 ]
 
 [project.scripts]
@@ -46,3 +46,6 @@ python_version = "3.12"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.uv]
+environments = ["sys_platform == 'darwin'"]
