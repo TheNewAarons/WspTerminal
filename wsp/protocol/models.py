@@ -22,7 +22,7 @@ RequestId = Annotated[
     str, StringConstraints(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_.:-]+$")
 ]
 Text = Annotated[str, StringConstraints(min_length=1, max_length=MAX_TEXT)]
-Ts = Annotated[int, Field(ge=0)]
+Ts = Annotated[int, Field(ge=0, le=2**63 - 1)]
 Limit = Annotated[int, Field(ge=1, le=MAX_LIMIT)]
 
 Status = Literal["pending", "sent", "delivered", "read", "failed"]
@@ -39,7 +39,9 @@ class ProtocolError(Exception):
 
 
 class _Model(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+    model_config = ConfigDict(
+        frozen=True, extra="forbid", strict=True, ser_json_inf_nan="constants"
+    )
 
 
 class Envelope(_Model):
@@ -294,7 +296,12 @@ def encode(env: Envelope) -> bytes:
     obj = env.model_dump(mode="json")
     if obj["request_id"] is None:
         del obj["request_id"]
-    body = json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    try:
+        body = json.dumps(obj, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode(
+            "utf-8"
+        )
+    except (ValueError, UnicodeError):  # NaN/Infinity o surrogates sueltos
+        raise ProtocolError("bad_encoding", "no se pudo serializar") from None
     if len(body) > MAX_LINE:
         raise ProtocolError("line_too_big", "mensaje demasiado grande")
     return body + b"\n"

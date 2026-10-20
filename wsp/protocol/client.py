@@ -8,7 +8,9 @@ reintentar de forma idempotente, reusar el mismo `request_id`.
 import asyncio
 import contextlib
 import logging
+import os
 import random
+import stat
 import uuid
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -18,6 +20,7 @@ from typing import Any, Final, Literal, Self
 
 from wsp.protocol.models import (
     MAX_LINE,
+    BackfillEnd,
     Command,
     Envelope,
     Event,
@@ -30,6 +33,7 @@ from wsp.protocol.models import (
     read_line,
     to_envelope,
 )
+from wsp.protocol.peer import peer_uid
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +48,10 @@ class ConnectionLost(ConnectionError):
 
 class RequestTimeout(TimeoutError):
     """El daemon no respondió a tiempo (el comando pudo haberse ejecutado)."""
+
+
+class _Resync(Exception):
+    """Backfill truncado: reconectar de inmediato con el último ts del backfill."""
 
 
 class RemoteError(Exception):
@@ -78,7 +86,7 @@ class Client:
         self._kind = kind
         self._last_ts = since
         self._events: asyncio.Queue[Any] = asyncio.Queue(queue_size)
-        self._seen: OrderedDict[tuple[str, str], None] = OrderedDict()
+        self._seen: OrderedDict[tuple[str, str], MessageNew] = OrderedDict()
         self._seen_size = seen_size
         self._rand = rand
         self._sleep = sleep
@@ -88,6 +96,7 @@ class Client:
         self._pending: dict[str, asyncio.Future[Mapping[str, Any]]] = {}
         self._task: asyncio.Task[None] | None = None
         self._attempt = 0
+        self._session_since: int | None = None
         self.last_error: str | None = None
 
     @property
@@ -184,7 +193,9 @@ class Client:
 
     async def _run(self) -> None:
         while True:
+            resync = False
             try:
+                self._check_socket()
                 reader, writer = await asyncio.open_unix_connection(
                     str(self._path), limit=MAX_LINE + 1
                 )
@@ -193,16 +204,30 @@ class Client:
             else:
                 try:
                     await self._session(reader, writer)
-                except (ConnectionError, ProtocolError, asyncio.IncompleteReadError) as e:
+                except _Resync:
+                    resync = self._last_ts != self._session_since  # solo si avanzó
+                except Exception as e:  # el bucle nunca debe morir en silencio
                     self.last_error = type(e).__name__
                 finally:
                     self._drop()
                     writer.close()
+            if resync:
+                continue
             await self._sleep(backoff_delay(self._attempt, self._rand()))
             self._attempt += 1
 
+    def _check_socket(self) -> None:
+        """Solo habla con un socket propio (evita un socket suplantado)."""
+        st = os.lstat(self._path)
+        if not stat.S_ISSOCK(st.st_mode) or st.st_uid != os.getuid():
+            raise PermissionError("socket no confiable")
+
     async def _session(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        sock = writer.get_extra_info("socket")
+        if sock is None or peer_uid(sock) != os.getuid():
+            raise PermissionError("peer no confiable")
         rid = "hello-" + uuid.uuid4().hex[:12]
+        self._session_since = self._last_ts
         hello = Hello(since=self._last_ts, client=self._kind)
         writer.write(encode(to_envelope(hello, rid)))
         await writer.drain()
@@ -214,7 +239,7 @@ class Client:
         self.last_error = None
         self._ready.set()
         while True:
-            await self._dispatch(await self._read(reader))
+            self._dispatch(await self._read(reader))
 
     async def _read(self, reader: asyncio.StreamReader) -> Envelope:
         line = await read_line(reader)
@@ -222,8 +247,8 @@ class Client:
             raise ConnectionLost("el daemon cerró la conexión")
         return decode_line(line)
 
-    async def _dispatch(self, env: Envelope) -> None:
-        if env.type in ("ok", "fail"):
+    def _dispatch(self, env: Envelope) -> None:
+        if env.type in ("ok", "fail"):  # nunca pasan por la cola de eventos
             fut = self._pending.get(env.request_id or "")
             if fut is not None and not fut.done():
                 if env.type == "ok":
@@ -238,16 +263,22 @@ class Client:
         except ProtocolError as e:
             log.warning("evento ignorado code=%s", e.code)  # tipo nuevo o inválido
             return
-        if isinstance(event, MessageNew):
-            key = (event.chat_jid, event.wa_id)
-            if key in self._seen:
-                return
-            self._seen[key] = None
+        key = (event.chat_jid, event.wa_id) if isinstance(event, MessageNew) else None
+        if key is not None and self._seen.get(key) == event:
+            return  # reenvío idéntico (backfill inclusivo); un cambio de estado sí pasa
+        try:
+            self._events.put_nowait(event)
+        except asyncio.QueueFull:  # consumidor lento: reconectar y recuperar desde `since`
+            raise ConnectionLost("consumidor lento") from None
+        if isinstance(event, MessageNew) and key is not None:
+            self._seen[key] = event
+            self._seen.move_to_end(key)
             if len(self._seen) > self._seen_size:
                 self._seen.popitem(last=False)
             if self._last_ts is None or event.ts > self._last_ts:
                 self._last_ts = event.ts
-        await self._events.put(event)
+        elif isinstance(event, BackfillEnd) and event.truncated:
+            raise _Resync
 
     def _drop(self) -> None:
         self._ready.clear()

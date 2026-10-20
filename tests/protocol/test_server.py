@@ -122,14 +122,24 @@ async def test_three_invalid_lines_close(make_server: MakeServer, connect: Conne
 
 async def test_valid_command_resets_strikes(make_server: MakeServer, connect: Connect) -> None:
     await make_server()
-    raw = await connect()
+    raw = await _ready(connect)
     await raw.send_bytes(b"basura\nbasura\n")
-    await raw.send("ping", "r1")  # hello_required: línea válida, resetea
+    await raw.send("ping", "r1")  # válido: resetea strikes
     await raw.send_bytes(b"basura\nbasura\n")
     await raw.send("ping", "r2")
     envs = await raw.recv_n(6)
-    assert [e.type for e in envs] == ["error", "error", "fail", "error", "error", "fail"]
+    assert [e.type for e in envs] == ["error", "error", "ok", "error", "error", "ok"]
     assert envs[5].request_id == "r2"
+
+
+async def test_hello_required_counts_as_strike(make_server: MakeServer, connect: Connect) -> None:
+    await make_server()
+    raw = await connect()
+    for i in range(3):
+        await raw.send("ping", f"r{i}")
+    envs = await raw.recv_n(4)
+    assert [e.type for e in envs[:3]] == ["fail", "fail", "fail"]
+    assert envs[3].data["code"] == "too_many_errors"
 
 
 async def test_command_before_hello(make_server: MakeServer, connect: Connect) -> None:

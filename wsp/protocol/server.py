@@ -9,14 +9,15 @@ import asyncio
 import contextlib
 import logging
 import os
-import socket
 import stat
-import struct
-from collections import deque
+import time
+from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
+
+from pydantic import ValidationError
 
 from wsp.protocol.models import (
     MAX_LINE,
@@ -40,6 +41,7 @@ from wsp.protocol.models import (
     read_line,
     to_envelope,
 )
+from wsp.protocol.peer import peer_uid
 from wsp.store import db, repo
 
 log = logging.getLogger(__name__)
@@ -47,8 +49,10 @@ log = logging.getLogger(__name__)
 _SOCKET_MAX: Final = 104  # límite de AF_UNIX en macOS
 _MAX_STRIKES: Final = 3  # líneas inválidas consecutivas antes de cortar
 _KICK_GRACE: Final = 1.0
-_SOL_LOCAL: Final = 0
-_LOCAL_PEERCRED: Final = 0x001  # <sys/un.h>
+_HELLO_TIMEOUT: Final = 10.0
+_MAX_CONNS: Final = 32
+_CACHE_MAX: Final = 1024
+_CACHE_TTL: Final = 600.0
 
 Handler = Callable[[str, HandledCommand], Awaitable[Mapping[str, Any]]]
 """(request_id, comando) → data del `ok`. Lanza `CommandError` para un `fail` controlado."""
@@ -69,19 +73,6 @@ class AlreadyRunningError(OSError):
     """Otro daemon está escuchando en el socket."""
 
 
-def peer_uid(sock: socket.socket) -> int | None:
-    """UID del proceso en el otro extremo (equivalente a getpeereid); None si no se puede."""
-    try:
-        so_peercred: int | None = getattr(socket, "SO_PEERCRED", None)
-        if so_peercred is not None:  # Linux: struct ucred {pid, uid, gid}
-            data = sock.getsockopt(socket.SOL_SOCKET, so_peercred, struct.calcsize("3i"))
-            return int(struct.unpack_from("3i", data)[1])
-        data = sock.getsockopt(_SOL_LOCAL, _LOCAL_PEERCRED, 256)  # macOS: struct xucred
-        return int(struct.unpack_from("=II", data)[1])  # (cr_version, cr_uid)
-    except (OSError, struct.error):
-        return None
-
-
 def sqlite_backfill(db_path: Path | None = None) -> BackfillSource:
     """Fuente de backfill desde SQLite (conexión de solo lectura, fuera del loop)."""
 
@@ -91,23 +82,30 @@ def sqlite_backfill(db_path: Path | None = None) -> BackfillSource:
             rows = repo.messages_since(conn, max(since - 1, 0), repo.MAX_LIMIT)
         finally:
             conn.close()
-        events = [
-            MessageNew(
-                chat_jid=r.chat_jid,
-                wa_id=r.wa_id,
-                sender_jid=r.sender_jid,
-                from_me=r.from_me,
-                ts=r.ts,
-                kind=r.kind,
-                body=r.body,
-                quoted_wa_id=r.quoted_wa_id,
-                status=r.status,
-                error=r.error,
-                edited_at=r.edited_at,
-                deleted_at=r.deleted_at,
-            )
-            for r in rows
-        ]
+        events: list[MessageNew] = []
+        skipped = 0
+        for r in rows:
+            try:
+                events.append(
+                    MessageNew(
+                        chat_jid=r.chat_jid,
+                        wa_id=r.wa_id,
+                        sender_jid=r.sender_jid,
+                        from_me=r.from_me,
+                        ts=r.ts,
+                        kind=r.kind,
+                        body=r.body,
+                        quoted_wa_id=r.quoted_wa_id,
+                        status=r.status,
+                        error=r.error,
+                        edited_at=r.edited_at,
+                        deleted_at=r.deleted_at,
+                    )
+                )
+            except ValidationError:  # fila fuera de los límites del protocolo
+                skipped += 1
+        if skipped:
+            log.warning("backfill: filas inválidas omitidas n=%d", skipped)
         return events, len(rows) >= repo.MAX_LIMIT
 
     async def source(since: int) -> tuple[list[MessageNew], bool]:
@@ -118,6 +116,13 @@ def sqlite_backfill(db_path: Path | None = None) -> BackfillSource:
 
 def _key(event: Payload) -> tuple[str, str] | None:
     return (event.chat_jid, event.wa_id) if isinstance(event, MessageNew) else None
+
+
+@dataclass(eq=False)
+class _Entry:
+    fingerprint: str
+    result: asyncio.Future[Envelope]
+    at: float
 
 
 @dataclass(eq=False)
@@ -144,12 +149,18 @@ class Server:
         *,
         queue_size: int = 256,
         write_timeout: float = 10.0,
+        handler_timeout: float = 30.0,
+        hello_timeout: float = _HELLO_TIMEOUT,
     ) -> None:
         self._path = path
         self._handler = handler
         self._backfill = backfill
         self._queue_size = queue_size
         self._write_timeout = write_timeout
+        self._handler_timeout = handler_timeout
+        self._hello_timeout = hello_timeout
+        self._sock_id: tuple[int, int] | None = None
+        self._cache: OrderedDict[str, _Entry] = OrderedDict()
         self._server: asyncio.Server | None = None
         self._conns: set[_Conn] = set()
         self._tasks: set[asyncio.Task[None]] = set()
@@ -174,6 +185,8 @@ class Server:
         finally:
             os.umask(old)
         os.chmod(self._path, 0o600)
+        st = os.lstat(self._path)
+        self._sock_id = (st.st_dev, st.st_ino)
 
     async def stop(self) -> None:
         server, self._server = self._server, None
@@ -186,8 +199,12 @@ class Server:
         if server is not None:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(server.wait_closed(), 2.0)
-        with contextlib.suppress(FileNotFoundError):
-            self._path.unlink()
+        sock_id, self._sock_id = self._sock_id, None
+        if sock_id is not None:  # solo el socket que creamos; nunca el de otro daemon
+            with contextlib.suppress(FileNotFoundError):
+                st = os.lstat(self._path)
+                if (st.st_dev, st.st_ino) == sock_id:
+                    self._path.unlink()
 
     # ---- broadcast ----------------------------------------------------------------------
 
@@ -197,8 +214,8 @@ class Server:
             self._account = payload
         try:
             line = encode(to_envelope(payload))
-        except ProtocolError:
-            log.warning("broadcast descartado code=line_too_big type=%s", payload.TYPE)
+        except ProtocolError as e:
+            log.warning("broadcast descartado code=%s type=%s", e.code, payload.TYPE)
             return
         for c in list(self._conns):
             if not c.subscribed or c.closing:
@@ -225,6 +242,10 @@ class Server:
             log.warning("conexión rechazada code=bad_peer")
             writer.transport.abort()
             return
+        if len(self._conns) >= _MAX_CONNS:
+            log.warning("conexión rechazada code=too_many_connections")
+            writer.transport.abort()
+            return
         self._next_id += 1
         c = _Conn(self._next_id, reader, writer, asyncio.Queue(self._queue_size))
         self._conns.add(c)
@@ -232,6 +253,8 @@ class Server:
             await self._read_loop(c)
         except (ConnectionError, asyncio.IncompleteReadError, TimeoutError):
             pass
+        except Exception as e:  # sin traceback: el mensaje podría llevar contenido
+            log.error("conexión falló id=%d exc=%s", c.id, type(e).__name__)
         finally:
             self._conns.discard(c)
             c.closing = True
@@ -243,9 +266,15 @@ class Server:
         strikes = 0
         while not c.closing:
             try:
-                line = await read_line(c.reader)
+                if c.client is None:
+                    line = await asyncio.wait_for(read_line(c.reader), self._hello_timeout)
+                else:
+                    line = await read_line(c.reader)
             except ProtocolError as e:
                 await self._send_direct(c, error_envelope(e.code, e.message))
+                return
+            except TimeoutError:
+                await self._send_direct(c, error_envelope("hello_timeout", "falta hello"))
                 return
             if line is None:
                 return
@@ -286,23 +315,56 @@ class Server:
             return True
         if c.client is None:
             await self._reply(c, fail(rid, "hello_required", "envía hello primero"))
-            return True
+            return False
         if isinstance(cmd, Ping):
             await self._reply(c, ok(rid))
             return True
+        await self._reply(c, await self._execute(rid, cmd))
+        return True
+
+    async def _execute(self, rid: str, cmd: HandledCommand) -> Envelope:
+        """Ejecuta el handler una sola vez por request_id (en vuelo o ya resuelto)."""
+        now = time.monotonic()
+        while self._cache:
+            oldest = next(iter(self._cache.values()))
+            if len(self._cache) <= _CACHE_MAX and now - oldest.at <= _CACHE_TTL:
+                break
+            if not oldest.result.done():
+                break
+            self._cache.popitem(last=False)
+        fingerprint = cmd.model_dump_json()
+        hit = self._cache.get(rid)
+        if hit is not None and hit.result.cancelled():
+            self._cache.pop(rid, None)
+            hit = None
+        if hit is not None:
+            if hit.fingerprint != fingerprint:
+                return fail(rid, "request_id_reused", "request_id usado con otro contenido")
+            return await asyncio.shield(hit.result)
+        entry = _Entry(fingerprint, asyncio.get_running_loop().create_future(), now)
+        self._cache[rid] = entry
+        cacheable = True
         try:
-            data = await self._handler(rid, cmd)
+            data = await asyncio.wait_for(self._handler(rid, cmd), self._handler_timeout)
             resp = ok(rid, data)
             encode(resp)  # valida tamaño antes de encolar
         except CommandError as e:
             resp = fail(rid, e.code, e.message)
         except ProtocolError as e:
             resp = fail(rid, e.code, "respuesta demasiado grande")
-        except Exception as e:
-            log.exception("handler falló type=%s exc=%s", cmd.TYPE, type(e).__name__)
-            resp = fail(rid, "internal", "error interno")
-        await self._reply(c, resp)
-        return True
+        except TimeoutError:
+            resp, cacheable = fail(rid, "timeout", "el comando tardó demasiado"), False
+        except Exception as e:  # sin traceback: el mensaje podría llevar contenido
+            log.error("handler falló type=%s exc=%s", cmd.TYPE, type(e).__name__)
+            resp, cacheable = fail(rid, "internal", "error interno"), False
+        except BaseException:
+            self._cache.pop(rid, None)
+            entry.result.cancel()
+            raise
+        if not cacheable:  # los fallos transitorios se pueden reintentar con el mismo id
+            self._cache.pop(rid, None)
+        entry.result.set_result(resp)
+        return resp
 
     async def _hello(self, c: _Conn, rid: str, cmd: Hello) -> None:
         c.client = cmd.client
@@ -313,7 +375,13 @@ class Server:
         if self._account is not None:
             await self._send_direct(c, to_envelope(self._account))
         if cmd.since is not None:
-            events, truncated = await self._backfill(cmd.since)
+            try:
+                events, truncated = await self._backfill(cmd.since)
+            except Exception as e:  # sin detalle: puede incluir filas/PII
+                log.error("backfill falló exc=%s", type(e).__name__)
+                await self._send_direct(c, error_envelope("backfill_failed", "backfill falló"))
+                self._abort(c)
+                return
             await self._send_direct(c, to_envelope(BackfillStart(since=cmd.since)))
             for m in events:
                 c.sent_keys.add((m.chat_jid, m.wa_id))
