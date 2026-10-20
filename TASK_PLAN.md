@@ -34,21 +34,34 @@ Ramas: F0 `feat/f0-bootstrap`; resto `phase-N-<tema>`. Un PR por fase (`gh pr cr
 
 ---
 
-## Fase 1 — Store y migraciones (rama `phase-1-store`)
+## Fase 1 — Store y migraciones (rama `feat/f1-store`, commits 29eb3bb y 1344b9c)
 
-- [~] **F1.1** Runner de migraciones por `PRAGMA user_version`, transaccional · Agente: database-agent · Deps: F0.12 · Aceptación: `uv run pytest tests/store/test_migrations.py -q` (DB vacía llega a última versión; re-ejecución no-op; fallo hace rollback sin avanzar versión)
-- [~] **F1.2** Conexión SQLite: WAL, `foreign_keys=ON`, `busy_timeout`, permisos 600 bajo `WSP_HOME`; archivos de datos (`wsp.db`, `-wal`, `-shm`, `session.db`, socket, logs) en permisos 600 usando `umask 0o077` antes de que neonize abra `session.db` · Agente: database-agent · Deps: F1.1 · Aceptación: `uv run pytest tests/store/test_connection.py -q`
-- [~] **F1.3** Migración 0001: chats, contacts, messages, reactions, mutes, estado de envío; UNIQUE en `wa_message_id` · Agente: database-agent · Deps: F1.1 · Aceptación: `uv run pytest tests/store/test_schema.py -q`
-- [~] **F1.4** Índices (chat_id+timestamp, wa_message_id) · Agente: database-agent · Deps: F1.3 · Aceptación: `uv run pytest tests/store/test_indexes.py -q` (EXPLAIN QUERY PLAN usa índices)
-- [~] **F1.5** FTS5 para `/search` con triggers de sincronización · Agente: database-agent · Deps: F1.3 · Aceptación: `uv run pytest tests/store/test_fts.py -q` (insert/update/delete coherentes)
-- [~] **F1.6** API del store: upserts idempotentes, `since=<ts>`, listado de chats, historial; SQL parametrizado · Agente: database-agent · Deps: F1.3, F1.4 · Aceptación: `uv run pytest tests/store/test_api.py -q` (doble upsert no duplica)
-- [~] **F1.7** Retención configurable (purga por antigüedad) · Agente: database-agent · Deps: F1.6, F1.5 · Aceptación: `uv run pytest tests/store/test_retention.py -q`
-- [~] **F1.8** Benchmark 100k mensajes + EXPLAIN documentado · Agente: database-agent · Deps: F1.4, F1.5 · Aceptación: `uv run pytest tests/store/test_bench.py -q` sin full scan; tiempos en Bitácora
-- [ ] **F1.9** Tests restantes y fixtures DB temporal · Agente: bulk-agent · Deps: F1.6 · Aceptación: `uv run pytest tests/store -q`
-- [ ] **F1.10** Gates en verde · Agente: orquestador · Deps: F1.9 · Aceptación: `uv run pytest && uv run ruff check && uv run ruff format --check && uv run mypy wsp`
-- [ ] **F1.11** security-reviewer sobre `git diff main...HEAD` · Agente: security-reviewer · Deps: F1.10 · Aceptación: sin bloqueantes; SQL parametrizado (`git grep -nE "execute\(f[\"']" wsp/store` vacío)
-- [ ] **F1.12** PR fase 1 · Agente: orquestador · Deps: F1.11 · Aceptación: `gh pr view --json state,mergeable`
-- [ ] **F1.13** Cierre: actualizar TASK_PLAN.md · Agente: planner · Deps: F1.12 · Aceptación: sin `[~]` en fase 1
+- [x] **F1.1** Runner de migraciones por `PRAGMA user_version`: `wsp/store/migrate.py`, transacción por archivo, error si la DB es más nueva que las migraciones conocidas · Agente: database-agent · Deps: F0.12 · Aceptación: `uv run pytest tests/store -q`
+- [x] **F1.2** Conexión SQLite: `wsp/store/db.py`, WAL, `foreign_keys=ON`, `busy_timeout`, permisos 600, conexión writer + conexión read-only · Agente: database-agent · Deps: F1.1 · Aceptación: `uv run pytest tests/store -q`
+- [x] **F1.3** Migración `0001_init.sql`: chats, contacts, messages, reactions, mutes, outbox/estado de envío; UNIQUE en `wa_message_id` · Agente: database-agent · Deps: F1.1 · Aceptación: `uv run pytest tests/store -q`
+- [x] **F1.4** Índices (chat+timestamp, wa_message_id) en `0002_indexes_fts.sql` · Agente: database-agent · Deps: F1.3 · Aceptación: EXPLAIN QUERY PLAN usa índices (`docs/query-plans.md`)
+- [x] **F1.5** FTS5 + triggers de sincronización en `0002_indexes_fts.sql` · Agente: database-agent · Deps: F1.3 · Aceptación: `uv run pytest tests/store -q` (insert/update/delete coherentes)
+- [x] **F1.6** API tipada `wsp/store/repo.py`: upserts idempotentes, `since=<ts>`, listado de chats, historial, search; SQL parametrizado · Agente: database-agent · Deps: F1.3, F1.4 · Aceptación: `uv run pytest tests/store -q`
+- [x] **F1.7** Retención (purga por antigüedad) en `repo.py` · Agente: database-agent · Deps: F1.6, F1.5 · Aceptación: `uv run pytest tests/store -q`
+- [x] **F1.8** `tools/seed_fake.py` (100k mensajes / 300 chats) + `docs/query-plans.md`; sin full scan; last_messages ~0.2 ms, search ~9 ms · Agente: database-agent · Deps: F1.4, F1.5 · Aceptación: tiempos en Bitácora
+- [x] **F1.9** Tests y fixtures de DB temporal · Agente: bulk-agent · Deps: F1.6 · Aceptación: 63 tests verdes
+- [x] **F1.10** Gates en verde (63 tests, ruff y mypy limpios) · Agente: orquestador · Deps: F1.9 · Aceptación: `uv run pytest && uv run ruff check && uv run ruff format --check && uv run mypy wsp`
+- [x] **F1.11** security-reviewer sobre `git diff main...HEAD` · Agente: security-reviewer · Deps: F1.10 · Aceptación: sin bloqueantes; hallazgos corregidos en 1344b9c
+- [ ] **F1.12** PR fase 1 (`feat/f1-store`) · Agente: orquestador · Deps: F1.11 · Aceptación: `gh pr view --json state,mergeable`
+- [x] **F1.13** Cierre: actualizar TASK_PLAN.md · Agente: planner · Deps: F1.11 · Aceptación: sin `[~]` en fase 1
+
+### Pendientes trasladados de Fase 1: migración 0003 (database-agent)
+
+Ejecutar antes de F3.4 (persistencia). Un solo archivo `wsp/store/migrations/0003_*.sql` + cambios en `repo.py`/`migrate.py` + tests. Ids del reviewer entre paréntesis.
+
+- [ ] **F1.14** (M1) `UNIQUE(chat_jid, wa_id, COALESCE(sender_jid,''))` en messages · Agente: database-agent · Deps: F1.13 · Aceptación: test de duplicado con `sender_jid` NULL no inserta dos filas
+- [ ] **F1.15** (M4) Purge marca outbox `sending` atascadas como `failed` en vez de borrarlas · Agente: database-agent · Deps: F1.14 · Aceptación: test de purge conserva fila con estado `failed`
+- [ ] **F1.16** (B2) Purgar chats/contactos huérfanos · Agente: database-agent · Deps: F1.14 · Aceptación: test sin huérfanos tras purge
+- [ ] **F1.17** (B3) `apply_delete` borra también reacciones del mensaje · Agente: database-agent · Deps: F1.14 · Aceptación: test sin filas en reactions tras delete
+- [ ] **F1.18** (B4) Guard `in_transaction` antes de `ROLLBACK` · Agente: database-agent · Deps: F1.14 · Aceptación: test de error previo al `BEGIN` no enmascara la excepción original
+- [ ] **F1.19** (B1) Tope de tamaño de payload en outbox y vaciado del payload en `failed` definitivo · Agente: database-agent · Deps: F1.14 · Aceptación: test de payload excedido rechazado y payload NULL tras fallo definitivo
+- [ ] **F1.20** (B8) Tope de 64 chars por token FTS · Agente: database-agent · Deps: F1.14 · Aceptación: test de token largo no rompe `/search`
+- [ ] **F1.21** Gates + security-reviewer sobre 0003 · Agente: orquestador · Deps: F1.15–F1.20 · Aceptación: `uv run pytest && uv run ruff check && uv run ruff format --check && uv run mypy wsp`; sin bloqueantes
 
 ---
 
@@ -84,6 +97,12 @@ Ramas: F0 `feat/f0-bootstrap`; resto `phase-N-<tema>`. Un PR por fase (`gh pr cr
 - [ ] **F3.13** PR fase 3 · Agente: orquestador · Deps: F3.12 · Aceptación: `gh pr view --json state,mergeable`
 - [ ] **F3.14** Cierre: actualizar TASK_PLAN.md · Agente: planner · Deps: F3.13 · Aceptación: sin `[~]` en fase 3
 
+Pendientes trasladados de Fase 1 (completar antes de F3.11):
+
+- [ ] **F3.15** (A1) Daemon guarda siempre `sender_jid=chat_jid` en entrantes directos; test de integración; contadores de `applied=False` sin PII · Agente: orquestador · Deps: F3.4, F1.14 · Aceptación: `uv run pytest tests/daemon/test_persistence.py -q`
+- [ ] **F3.16** (M2) Daemon ejecuta FTS `optimize` + `wal_checkpoint(TRUNCATE)` tras borrados · Agente: orquestador · Deps: F3.4 · Aceptación: `uv run pytest tests/daemon/test_maintenance.py -q`
+- [ ] **F3.17** (M3) Errores de outbox/status como códigos, no texto libre; normalizar separadores antes de redactar dígitos · Agente: orquestador · Deps: F3.1, F3.5 · Aceptación: `uv run pytest tests/daemon/test_log_redaction.py -q` (`+34 600-123-456` redactado)
+
 ---
 
 ## Fase 4 — LaunchAgent + `wsp daemon` (rama `phase-4-launchd`)
@@ -117,6 +136,7 @@ Ramas: F0 `feat/f0-bootstrap`; resto `phase-N-<tema>`. Un PR por fase (`gh pr cr
 - [ ] **F5.10** security-reviewer sobre `git diff main...HEAD` · Agente: security-reviewer · Deps: F5.9 · Aceptación: sin bloqueantes (escapes de terminal en contenido entrante)
 - [ ] **F5.11** PR fase 5 · Agente: orquestador · Deps: F5.10 · Aceptación: `gh pr view --json state,mergeable`
 - [ ] **F5.12** Cierre: actualizar TASK_PLAN.md · Agente: planner · Deps: F5.11 · Aceptación: sin `[~]` en fase 5
+- [ ] **F5.13** (B6, trasladado de F1) Paginar `messages_since` con cursor `(ts,id)` · Agente: orquestador · Deps: F5.5 · Aceptación: `uv run pytest tests/cli/test_reconnect_backfill.py -q` (sin saltos ni duplicados entre páginas; completar antes de F5.9)
 
 ---
 
@@ -146,4 +166,6 @@ Ramas: F0 `feat/f0-bootstrap`; resto `phase-N-<tema>`. Un PR por fase (`gh pr cr
 <!-- Formato: AAAA-MM-DD · tarea · nota (decisiones, métricas, intentos fallidos) -->
 
 2026-10-20 · F0 · Fase 0 cerrada: 8 tests en verde, security-reviewer sin bloqueantes (altos/medios corregidos en 5610e19), PR abierto en `feat/f0-bootstrap`. pip-audit no corre en sandbox: pendiente que el usuario ejecute fuera `uv export --no-dev | uvx pip-audit -r /dev/stdin`.
+2026-10-20 · F1 · Fase 1 cerrada (29eb3bb, 1344b9c): 63 tests, ruff/mypy limpios, security-reviewer sin bloqueantes; 100k msgs/300 chats: last_messages ~0.2 ms, search ~9 ms, sin full scan. PR F1.12 pendiente.
+2026-10-20 · F1 · Trasladado: 0003 (F1.14–F1.21), F3.15–F3.17, F5.13. Externo: pip-audit sigue pendiente (usuario, fuera del sandbox).
 2026-10-20 · F0 · `.claude/settings.json` y `.claude/hooks/*.sh` siguen con el stack viejo (el sandbox impide editarlos); pendiente actualizarlos fuera del sandbox.
