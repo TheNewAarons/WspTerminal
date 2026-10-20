@@ -3,7 +3,7 @@
 Interfaz de LÍNEA (sin curses/paneles/Textual), tiempo real, un solo usuario. Todo en español salvo código.
 
 ## Stack (cerrado; nada fuera de esta lista sin preguntar)
-Python 3.12+ con uv · neonize (whatsmeow) · SQLite stdlib WAL + migraciones SQL propias (`wsp/migrations/NNNN_*.sql`, según `PRAGMA user_version`) · pydantic v2 · prompt_toolkit (PromptSession + patch_stdout) · keyring (Llavero) · launchd · pytest, ruff, mypy --strict, pre-commit + detect-secrets.
+Python 3.12+ con uv · neonize (whatsmeow) · SQLite stdlib WAL + migraciones SQL propias (`wsp/store/migrations/NNNN_*.sql`, según `PRAGMA user_version`) · pydantic v2 · prompt_toolkit (PromptSession + patch_stdout) · keyring (Llavero) · launchd · pytest, ruff, mypy --strict, pre-commit + detect-secrets.
 
 ## Arquitectura
 - `wsp/daemon/` → `wspd`: ÚNICO proceso con la sesión de WhatsApp (LaunchAgent). Persiste en SQLite y emite a clientes por socket Unix `~/.local/state/wsp/wspd.sock` (600), JSON por líneas versionado; comandos con `request_id` idempotente.

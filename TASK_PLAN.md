@@ -1,129 +1,143 @@
 # TASK_PLAN — wsp
 
 Estados: `[ ]` pendiente · `[~]` en curso · `[x]` hecho.
-Ramas por fase: `phase-N-<tema>`. Anti-bucle: 2 fallos consecutivos → revertir y replantear aquí.
-Gates estándar: `uv run pytest` · `uv run ruff check` · `uv run ruff format --check` · `uv run mypy wsp`.
+Ids: `F<fase>.<n>`. Anti-bucle: 2 fallos consecutivos en una tarea → revertir y replantear aquí.
+Ramas: F0 `feat/f0-bootstrap`; resto `phase-N-<tema>`. Un PR por fase (`gh pr create`), sin CI.
 
-Agentes: `orquestador` (sesión principal), `database-agent`, `bulk-agent`, `refactor-agent`, `security-reviewer`, `planner`.
+## Referencias
+
+- Gates: `uv run pytest` · `uv run ruff check` · `uv run ruff format --check` · `uv run mypy wsp`
+- Rutas: migraciones `wsp/store/migrations/NNNN_*.sql` · tests `tests/{store,protocol,daemon,cli}/` · `wsp/paths.py` (`WSP_HOME`)
+- Entrypoints: `wsp.cli.main:app` (CLI) · `wsp.daemon.main:run` (daemon)
+- Deps runtime: neonize, prompt_toolkit, pydantic>=2, keyring, structlog, rapidfuzz (autocompletado difuso `/open`), qrcode (QR de pairing)
+- Deps dev: pytest, pytest-asyncio, ruff, mypy, pre-commit
+- Agentes: `orquestador` (sesión principal), `database-agent`, `bulk-agent`, `refactor-agent`, `security-reviewer`, `planner`
+- Cierre de cada fase: gates → security-reviewer sobre `git diff main...HEAD` → PR → planner. Bloqueantes de seguridad = no merge.
+- Esquema (tablas, índices, FTS5, triggers): siempre `database-agent`.
 
 ---
 
 ## Fase 0 — Bootstrap
 
-- [x] **F0-T1** pyproject (uv) + estructura `wsp/{daemon,cli,store,protocol,migrations}` · Agente: orquestador · Deps: — · Aceptación: `uv sync` ok; paquetes importables.
-- [x] **F0-T2** pre-commit (ruff, mypy, detect-secrets) · Agente: orquestador · Deps: F0-T1 · Aceptación: `pre-commit run --all-files` en verde.
-- [x] **F0-T3** `.gitignore` (DB, sesión, `.venv`, secrets) · Agente: orquestador · Deps: — · Aceptación: `git status` sin artefactos de datos.
-- [x] **F0-T4** `CLAUDE.md` actualizado al stack wsp · Agente: orquestador · Deps: — · Aceptación: describe arquitectura, agentes y fases.
-- [x] **F0-T5** Limpieza del stack viejo (apps/, packages/, Django/FastAPI/Astro/Expo) · Agente: orquestador · Deps: — · Aceptación: sin referencias al stack viejo en el árbol.
-- [ ] **F0-T6** Gates en verde · Agente: orquestador · Deps: F0-T1..T5 · Aceptación: los 4 comandos de gate exit 0.
-- [ ] **F0-T7** security-reviewer sobre `git diff main...HEAD` · Agente: security-reviewer · Deps: F0-T6 · Aceptación: sin hallazgos bloqueantes.
-- [~] **F0-T8** PR fase 0 (`gh pr create`) · Agente: orquestador · Deps: F0-T7 · Aceptación: PR abierto y mergeable.
-- [ ] **F0-T9** Actualizar TASK_PLAN.md (cierre fase 0) · Agente: planner · Deps: F0-T8 · Aceptación: estados y bitácora reflejan la realidad.
+- [x] **F0.1** pyproject (uv) + deps runtime y dev · Agente: orquestador · Deps: — · Aceptación: `uv sync` exit 0
+- [x] **F0.2** Estructura `wsp/{daemon,cli,store,protocol}` y entrypoints · Agente: orquestador · Deps: F0.1 · Aceptación: `uv run python -c "import wsp.cli.main, wsp.daemon.main"`
+- [x] **F0.3** ruff + mypy --strict configurados · Agente: orquestador · Deps: F0.1 · Aceptación: `uv run ruff check && uv run mypy wsp`
+- [x] **F0.4** pre-commit (ruff, ruff-format, mypy, detect-secrets + `.secrets.baseline`) · Agente: orquestador · Deps: F0.3 · Aceptación: `uv run pre-commit run --all-files`
+- [x] **F0.5** `.gitignore` (DB, sesión, `.venv`, `.env`, secrets) · Agente: orquestador · Deps: — · Aceptación: `git status --short` sin artefactos de datos
+- [x] **F0.6** `wsp/paths.py` (`WSP_HOME`) + tests · Agente: orquestador · Deps: F0.2 · Aceptación: `uv run pytest tests/test_paths.py -q`
+- [x] **F0.7** `CLAUDE.md` al stack wsp · Agente: orquestador · Deps: — · Aceptación: `grep -c "Fases" CLAUDE.md` ≥ 1
+- [x] **F0.8** `README.md` · Agente: bulk-agent · Deps: F0.2 · Aceptación: `test -s README.md`
+- [ ] **F0.9** Gates en verde · Agente: orquestador · Deps: F0.1–F0.8 · Aceptación: `uv run pytest && uv run ruff check && uv run ruff format --check && uv run mypy wsp`
+- [ ] **F0.10** security-reviewer sobre `git diff main...HEAD` · Agente: security-reviewer · Deps: F0.9 · Aceptación: informe sin hallazgos bloqueantes
+- [ ] **F0.11** PR fase 0 (rama `feat/f0-bootstrap`) · Agente: orquestador · Deps: F0.10 · Aceptación: `gh pr view --json state,mergeable` → OPEN/MERGEABLE
+- [ ] **F0.12** Cierre: actualizar TASK_PLAN.md · Agente: planner · Deps: F0.11 · Aceptación: `grep -c "^- \[~\]" TASK_PLAN.md` en fase 0 = 0
 
 ---
 
-## Fase 1 — Store y migraciones
+## Fase 1 — Store y migraciones (rama `phase-1-store`)
 
-- [ ] **F1-T1** Runner de migraciones: aplica `wsp/migrations/NNNN_*.sql` en orden según `PRAGMA user_version`, transaccional · Agente: database-agent · Deps: F0-T8 · Aceptación: DB vacía llega a la última versión; re-ejecución es no-op; migración fallida hace rollback sin avanzar `user_version`.
-- [ ] **F1-T2** Conexión SQLite: WAL, `foreign_keys=ON`, `busy_timeout`, permisos 600 en `~/.local/share/wsp/` · Agente: database-agent · Deps: F1-T1 · Aceptación: test verifica `journal_mode=wal` y modo de archivo 600.
-- [ ] **F1-T3** Migración 0001: tablas chats, contacts, messages, reactions, mutes, estado de envío · Agente: database-agent · Deps: F1-T1 · Aceptación: esquema aplicado; constraints UNIQUE sobre `wa_message_id`.
-- [ ] **F1-T4** Índices (chat_id+timestamp, wa_message_id) · Agente: database-agent · Deps: F1-T3 · Aceptación: `EXPLAIN QUERY PLAN` usa índices en listado por chat y búsqueda por id.
-- [ ] **F1-T5** FTS5 para `/search` con triggers de sincronización · Agente: database-agent · Deps: F1-T3 · Aceptación: búsqueda devuelve coincidencias tras insert/update/delete.
-- [ ] **F1-T6** API del store: upserts idempotentes (mensajes, chats, reacciones, estados), consultas `since=<ts>`, listado de chats, historial · Agente: database-agent · Deps: F1-T3, F1-T4 · Aceptación: doble upsert no duplica; SQL 100% parametrizado.
-- [ ] **F1-T7** Retención configurable (purga por antigüedad) · Agente: database-agent · Deps: F1-T6 · Aceptación: purga elimina solo lo anterior al umbral e índice FTS coherente.
-- [ ] **F1-T8** Benchmark con 100k mensajes + EXPLAIN documentado · Agente: database-agent · Deps: F1-T4, F1-T5 · Aceptación: consultas clave sin full scan; tiempos registrados en Bitácora.
-- [ ] **F1-T9** Tests del store y migraciones (fixtures DB temporal) · Agente: bulk-agent · Deps: F1-T6 · Aceptación: cobertura de runner, upserts, `since`, FTS, retención.
-- [ ] **F1-T10** Gates en verde · Agente: orquestador · Deps: F1-T9 · Aceptación: 4 comandos exit 0.
-- [ ] **F1-T11** security-reviewer sobre `git diff main...HEAD` · Agente: security-reviewer · Deps: F1-T10 · Aceptación: sin bloqueantes; SQL parametrizado confirmado.
-- [ ] **F1-T12** PR fase 1 · Agente: orquestador · Deps: F1-T11 · Aceptación: PR abierto.
-- [ ] **F1-T13** Actualizar TASK_PLAN.md · Agente: planner · Deps: F1-T12 · Aceptación: plan al día.
-
----
-
-## Fase 2 — Protocolo pydantic + socket Unix
-
-- [ ] **F2-T1** Modelos pydantic v2 versionados (eventos: mensaje, estado, reacción, conexión; comandos: send, react, mute, history, search, hello/since) · Agente: orquestador · Deps: F1-T12 · Aceptación: round-trip JSON válido; campo `v`; rechazo de payload inválido o versión desconocida.
-- [ ] **F2-T2** `request_id` idempotente en comandos y respuestas (ack/error con motivo) · Agente: orquestador · Deps: F2-T1 · Aceptación: mismo `request_id` devuelve el mismo resultado sin reejecutar.
-- [ ] **F2-T3** Codec JSON por líneas (framing, límite de tamaño de línea) · Agente: orquestador · Deps: F2-T1 · Aceptación: líneas parciales/concatenadas se parsean bien; línea sobredimensionada se rechaza.
-- [ ] **F2-T4** Servidor asyncio en `~/.local/state/wsp/wspd.sock` con permisos 600, limpieza de socket obsoleto, broadcast a múltiples clientes · Agente: orquestador · Deps: F2-T3 · Aceptación: socket modo 600; dos clientes reciben el mismo evento; cliente lento no bloquea a otros.
-- [ ] **F2-T5** Cliente de socket asyncio (conexión, reconexión, handshake con `since`) · Agente: orquestador · Deps: F2-T4 · Aceptación: cliente reconecta y envía `since`; error claro si no hay daemon.
-- [ ] **F2-T6** Tests de protocolo y socket (modelos, codec, idempotencia, permisos, concurrencia) · Agente: bulk-agent · Deps: F2-T5 · Aceptación: tests en verde, sin sleeps frágiles.
-- [ ] **F2-T7** Gates en verde · Agente: orquestador · Deps: F2-T6 · Aceptación: 4 comandos exit 0.
-- [ ] **F2-T8** security-reviewer sobre `git diff main...HEAD` · Agente: security-reviewer · Deps: F2-T7 · Aceptación: sin bloqueantes (validación de entrada, permisos, DoS por línea).
-- [ ] **F2-T9** PR fase 2 · Agente: orquestador · Deps: F2-T8 · Aceptación: PR abierto.
-- [ ] **F2-T10** Actualizar TASK_PLAN.md · Agente: planner · Deps: F2-T9 · Aceptación: plan al día.
+- [ ] **F1.1** Runner de migraciones por `PRAGMA user_version`, transaccional · Agente: database-agent · Deps: F0.12 · Aceptación: `uv run pytest tests/store/test_migrations.py -q` (DB vacía llega a última versión; re-ejecución no-op; fallo hace rollback sin avanzar versión)
+- [ ] **F1.2** Conexión SQLite: WAL, `foreign_keys=ON`, `busy_timeout`, permisos 600 bajo `WSP_HOME` · Agente: database-agent · Deps: F1.1 · Aceptación: `uv run pytest tests/store/test_connection.py -q`
+- [ ] **F1.3** Migración 0001: chats, contacts, messages, reactions, mutes, estado de envío; UNIQUE en `wa_message_id` · Agente: database-agent · Deps: F1.1 · Aceptación: `uv run pytest tests/store/test_schema.py -q`
+- [ ] **F1.4** Índices (chat_id+timestamp, wa_message_id) · Agente: database-agent · Deps: F1.3 · Aceptación: `uv run pytest tests/store/test_indexes.py -q` (EXPLAIN QUERY PLAN usa índices)
+- [ ] **F1.5** FTS5 para `/search` con triggers de sincronización · Agente: database-agent · Deps: F1.3 · Aceptación: `uv run pytest tests/store/test_fts.py -q` (insert/update/delete coherentes)
+- [ ] **F1.6** API del store: upserts idempotentes, `since=<ts>`, listado de chats, historial; SQL parametrizado · Agente: database-agent · Deps: F1.3, F1.4 · Aceptación: `uv run pytest tests/store/test_api.py -q` (doble upsert no duplica)
+- [ ] **F1.7** Retención configurable (purga por antigüedad) · Agente: database-agent · Deps: F1.6, F1.5 · Aceptación: `uv run pytest tests/store/test_retention.py -q`
+- [ ] **F1.8** Benchmark 100k mensajes + EXPLAIN documentado · Agente: database-agent · Deps: F1.4, F1.5 · Aceptación: `uv run pytest tests/store/test_bench.py -q` sin full scan; tiempos en Bitácora
+- [ ] **F1.9** Tests restantes y fixtures DB temporal · Agente: bulk-agent · Deps: F1.6 · Aceptación: `uv run pytest tests/store -q`
+- [ ] **F1.10** Gates en verde · Agente: orquestador · Deps: F1.9 · Aceptación: `uv run pytest && uv run ruff check && uv run ruff format --check && uv run mypy wsp`
+- [ ] **F1.11** security-reviewer sobre `git diff main...HEAD` · Agente: security-reviewer · Deps: F1.10 · Aceptación: sin bloqueantes; SQL parametrizado (`git grep -nE "execute\(f[\"']" wsp/store` vacío)
+- [ ] **F1.12** PR fase 1 · Agente: orquestador · Deps: F1.11 · Aceptación: `gh pr view --json state,mergeable`
+- [ ] **F1.13** Cierre: actualizar TASK_PLAN.md · Agente: planner · Deps: F1.12 · Aceptación: sin `[~]` en fase 1
 
 ---
 
-## Fase 3 — Daemon neonize
+## Fase 2 — Protocolo pydantic + socket Unix (rama `phase-2-protocolo`)
 
-- [ ] **F3-T1** Esqueleto `wspd`: ciclo de vida asyncio, señales, config (`~/.config/wsp/config.toml`), logging sin contenido ni números completos · Agente: orquestador · Deps: F2-T9 · Aceptación: arranca/para limpio con SIGTERM; test de redacción de logs (número enmascarado, sin cuerpo).
-- [ ] **F3-T2** Pairing (`wsp pair [--phone]`): QR en terminal y código por teléfono; sesión en `~/.local/share/wsp/` 600; secretos vía keyring · Agente: orquestador · Deps: F3-T1 · Aceptación: sesión persiste entre reinicios; archivo modo 600; sin secretos en logs.
-- [ ] **F3-T3** Puente de eventos neonize → modelos de protocolo (mensajes, recibos, reacciones, presencia, conexión) · Agente: orquestador · Deps: F3-T1, F2-T1 · Aceptación: eventos simulados producen modelos válidos.
-- [ ] **F3-T4** Persistencia: eventos entrantes/salientes al store (único escritor) con upserts idempotentes · Agente: orquestador · Deps: F3-T3, F1-T6 · Aceptación: evento duplicado no crea filas; estados ✓ ✓✓ ✗(motivo) actualizados.
-- [ ] **F3-T5** Envío idempotente por `request_id` (texto, reacción), persistiendo intención antes de enviar · Agente: orquestador · Deps: F3-T4, F2-T2 · Aceptación: reintento con mismo `request_id` no envía dos veces; fallo registra ✗ con motivo.
-- [ ] **F3-T6** Reconexión con backoff exponencial + jitter y reset tras éxito · Agente: orquestador · Deps: F3-T1 · Aceptación: test con reloj/azar inyectados verifica crecimiento, tope y jitter acotado.
-- [ ] **F3-T7** Rate limit de envíos con token bucket · Agente: orquestador · Deps: F3-T5 · Aceptación: ráfaga sobre capacidad se encola/rechaza con motivo; recarga correcta con reloj inyectado.
-- [ ] **F3-T8** Servicio de relleno: responder `since=<ts>` desde SQLite al cliente · Agente: orquestador · Deps: F3-T4, F2-T5 · Aceptación: cliente recibe solo mensajes > ts, en orden, sin duplicados.
-- [ ] **F3-T9** Revisión de concurrencia (carreras store/socket/neonize, cancelación) · Agente: orquestador · Deps: F3-T5..T8 · Aceptación: sin tareas huérfanas al apagar; sin escrituras concurrentes al store.
-- [ ] **F3-T10** Tests del daemon con neonize simulado (bridge, persistencia, idempotencia, backoff, token bucket, redacción de logs) · Agente: bulk-agent · Deps: F3-T9 · Aceptación: tests en verde sin red.
-- [ ] **F3-T11** Gates en verde · Agente: orquestador · Deps: F3-T10 · Aceptación: 4 comandos exit 0.
-- [ ] **F3-T12** security-reviewer sobre `git diff main...HEAD` · Agente: security-reviewer · Deps: F3-T11 · Aceptación: sin bloqueantes (sesión, keyring, logs, PII).
-- [ ] **F3-T13** PR fase 3 · Agente: orquestador · Deps: F3-T12 · Aceptación: PR abierto.
-- [ ] **F3-T14** Actualizar TASK_PLAN.md · Agente: planner · Deps: F3-T13 · Aceptación: plan al día.
+- [ ] **F2.1** Modelos pydantic v2 versionados (eventos: mensaje, estado, reacción, conexión; comandos: send, react, mute, history, search, hello/since) · Agente: orquestador · Deps: F1.13 · Aceptación: `uv run pytest tests/protocol/test_models.py -q` (round-trip, campo `v`, rechazo de inválidos/versión desconocida)
+- [ ] **F2.2** `request_id` idempotente, ack/error con motivo · Agente: orquestador · Deps: F2.1 · Aceptación: `uv run pytest tests/protocol/test_idempotency.py -q`
+- [ ] **F2.3** Codec JSON por líneas con límite de tamaño · Agente: orquestador · Deps: F2.1 · Aceptación: `uv run pytest tests/protocol/test_codec.py -q`
+- [ ] **F2.4** Servidor asyncio en `wspd.sock` (600), limpieza de socket obsoleto, broadcast; cliente lento no bloquea · Agente: orquestador · Deps: F2.3 · Aceptación: `uv run pytest tests/daemon/test_socket_server.py -q`
+- [ ] **F2.5** Cliente asyncio (reconexión, handshake `since`, error claro sin daemon) · Agente: orquestador · Deps: F2.4 · Aceptación: `uv run pytest tests/cli/test_socket_client.py -q`
+- [ ] **F2.6** Tests de protocolo y socket sin sleeps frágiles · Agente: bulk-agent · Deps: F2.5 · Aceptación: `uv run pytest tests/protocol tests/daemon tests/cli -q`
+- [ ] **F2.7** Gates en verde · Agente: orquestador · Deps: F2.6 · Aceptación: `uv run pytest && uv run ruff check && uv run ruff format --check && uv run mypy wsp`
+- [ ] **F2.8** security-reviewer sobre `git diff main...HEAD` · Agente: security-reviewer · Deps: F2.7 · Aceptación: sin bloqueantes (validación de entrada, permisos, DoS por línea)
+- [ ] **F2.9** PR fase 2 · Agente: orquestador · Deps: F2.8 · Aceptación: `gh pr view --json state,mergeable`
+- [ ] **F2.10** Cierre: actualizar TASK_PLAN.md · Agente: planner · Deps: F2.9 · Aceptación: sin `[~]` en fase 2
 
 ---
 
-## Fase 4 — LaunchAgent + `wsp daemon`
+## Fase 3 — Daemon neonize (rama `phase-3-daemon`)
 
-- [ ] **F4-T1** Generador de plist LaunchAgent (`KeepAlive`, `RunAtLoad`, rutas de log, entorno) · Agente: orquestador · Deps: F3-T13 · Aceptación: plist válido (`plutil -lint`); sin secretos embebidos.
-- [ ] **F4-T2** `wsp daemon install` (escribe plist, `launchctl bootstrap gui/<uid>`) · Agente: orquestador · Deps: F4-T1 · Aceptación: idempotente; daemon queda cargado.
-- [ ] **F4-T3** `wsp daemon uninstall` (bootout + elimina plist) · Agente: orquestador · Deps: F4-T2 · Aceptación: idempotente; no deja procesos ni plist.
-- [ ] **F4-T4** `wsp daemon status` (launchd + ping al socket + estado de conexión WhatsApp) · Agente: orquestador · Deps: F4-T2 · Aceptación: distingue no instalado / instalado detenido / corriendo / desconectado; exit code distinto por caso.
-- [ ] **F4-T5** `wsp daemon logs` (tail/`-f`, `-n`) con logs rotados · Agente: orquestador · Deps: F4-T2 · Aceptación: muestra últimas N líneas y sigue; sin contenido de mensajes.
-- [ ] **F4-T6** Tests de la capa launchd con `launchctl` simulado · Agente: bulk-agent · Deps: F4-T5 · Aceptación: tests en verde sin tocar launchd real.
-- [ ] **F4-T7** Refactor de fases 1-4: duplicación, async bloqueante, cancelación, latencia p50/p95 antes/después, sin cambio de comportamiento · Agente: refactor-agent · Deps: F4-T6 · Aceptación: tests existentes intactos y en verde; métricas antes/después en Bitácora.
-- [ ] **F4-T8** Gates en verde · Agente: orquestador · Deps: F4-T7 · Aceptación: 4 comandos exit 0.
-- [ ] **F4-T9** security-reviewer sobre `git diff main...HEAD` · Agente: security-reviewer · Deps: F4-T8 · Aceptación: sin bloqueantes (plist, permisos, rutas).
-- [ ] **F4-T10** PR fase 4 · Agente: orquestador · Deps: F4-T9 · Aceptación: PR abierto.
-- [ ] **F4-T11** Actualizar TASK_PLAN.md · Agente: planner · Deps: F4-T10 · Aceptación: plan al día.
-
----
-
-## Fase 5 — REPL en vivo
-
-- [ ] **F5-T1** REPL base: `PromptSession` + `patch_stdout`, prompt `› `, Ctrl-C/Ctrl-D limpios · Agente: orquestador · Deps: F4-T10 · Aceptación: mensajes entrantes se imprimen sin romper la línea en edición.
-- [ ] **F5-T2** Formato de líneas `[14:02] Juan › hola` y `[14:02] Familia / Ana › …`; estados ✓ ✓✓ ✗(motivo) · Agente: orquestador · Deps: F5-T1 · Aceptación: tests de formato para 1:1, grupo y cada estado.
-- [ ] **F5-T3** Soporte `NO_COLOR` y `--no-color` · Agente: orquestador · Deps: F5-T2 · Aceptación: sin secuencias ANSI con cualquiera de los dos.
-- [ ] **F5-T4** Conexión al socket y bucle de eventos en vivo · Agente: orquestador · Deps: F5-T1, F2-T5 · Aceptación: eventos del daemon se muestran en tiempo real.
-- [ ] **F5-T5** Relleno al reconectar: guardar último ts visto y pedir `since=<ts>` · Agente: orquestador · Deps: F5-T4, F3-T8 · Aceptación: tras matar/relanzar daemon no hay mensajes perdidos ni duplicados.
-- [ ] **F5-T6** Indicador de estado de conexión y mensaje claro si el daemon no corre (sugiere `wsp daemon install`) · Agente: orquestador · Deps: F5-T4 · Aceptación: mensaje en ambos casos sin traceback.
-- [ ] **F5-T7** Envío de texto plano desde el REPL en chat abierto, con `request_id` · Agente: orquestador · Deps: F5-T4, F3-T5 · Aceptación: reenvío por reconexión no duplica el mensaje.
-- [ ] **F5-T8** Tests del REPL (formato, relleno, reconexión, NO_COLOR) · Agente: bulk-agent · Deps: F5-T7 · Aceptación: tests en verde con daemon falso.
-- [ ] **F5-T9** Gates en verde · Agente: orquestador · Deps: F5-T8 · Aceptación: 4 comandos exit 0.
-- [ ] **F5-T10** security-reviewer sobre `git diff main...HEAD` · Agente: security-reviewer · Deps: F5-T9 · Aceptación: sin bloqueantes (inyección de escapes de terminal en contenido entrante).
-- [ ] **F5-T11** PR fase 5 · Agente: orquestador · Deps: F5-T10 · Aceptación: PR abierto.
-- [ ] **F5-T12** Actualizar TASK_PLAN.md · Agente: planner · Deps: F5-T11 · Aceptación: plan al día.
+- [ ] **F3.1** Esqueleto `wsp.daemon.main:run`: ciclo de vida asyncio, señales, `config.toml`, structlog sin contenido ni números completos · Agente: orquestador · Deps: F2.10 · Aceptación: `uv run pytest tests/daemon/test_lifecycle.py tests/daemon/test_log_redaction.py -q`
+- [ ] **F3.2** Pairing `wsp pair [--phone]` (qrcode en terminal / código por teléfono); sesión 600; secretos vía keyring · Agente: orquestador · Deps: F3.1 · Aceptación: `uv run pytest tests/daemon/test_pairing.py -q`
+- [ ] **F3.3** Puente de eventos neonize → modelos de protocolo · Agente: orquestador · Deps: F3.1, F2.1 · Aceptación: `uv run pytest tests/daemon/test_bridge.py -q`
+- [ ] **F3.4** Persistencia al store (único escritor), upserts idempotentes, estados ✓ ✓✓ ✗(motivo) · Agente: orquestador · Deps: F3.3, F1.6 · Aceptación: `uv run pytest tests/daemon/test_persistence.py -q`
+- [ ] **F3.5** Envío idempotente por `request_id` (texto, reacción), intención persistida antes de enviar · Agente: orquestador · Deps: F3.4, F2.2 · Aceptación: `uv run pytest tests/daemon/test_send.py -q`
+- [ ] **F3.6** Reconexión con backoff exponencial + jitter (reloj/azar inyectados) · Agente: orquestador · Deps: F3.1 · Aceptación: `uv run pytest tests/daemon/test_backoff.py -q`
+- [ ] **F3.7** Token bucket de envíos · Agente: orquestador · Deps: F3.5 · Aceptación: `uv run pytest tests/daemon/test_rate_limit.py -q`
+- [ ] **F3.8** Relleno `since=<ts>` desde SQLite · Agente: orquestador · Deps: F3.4, F2.5 · Aceptación: `uv run pytest tests/daemon/test_backfill.py -q`
+- [ ] **F3.9** Revisión de concurrencia (carreras store/socket/neonize, cancelación, tareas huérfanas) · Agente: orquestador · Deps: F3.5–F3.8 · Aceptación: `uv run pytest tests/daemon -q -W error`
+- [ ] **F3.10** Tests del daemon con neonize simulado, sin red · Agente: bulk-agent · Deps: F3.9 · Aceptación: `uv run pytest tests/daemon -q`
+- [ ] **F3.11** Gates en verde · Agente: orquestador · Deps: F3.10 · Aceptación: `uv run pytest && uv run ruff check && uv run ruff format --check && uv run mypy wsp`
+- [ ] **F3.12** security-reviewer sobre `git diff main...HEAD` · Agente: security-reviewer · Deps: F3.11 · Aceptación: sin bloqueantes (sesión, keyring, logs, PII)
+- [ ] **F3.13** PR fase 3 · Agente: orquestador · Deps: F3.12 · Aceptación: `gh pr view --json state,mergeable`
+- [ ] **F3.14** Cierre: actualizar TASK_PLAN.md · Agente: planner · Deps: F3.13 · Aceptación: sin `[~]` en fase 3
 
 ---
 
-## Fase 6 — Comandos, notificaciones, send/tail
+## Fase 4 — LaunchAgent + `wsp daemon` (rama `phase-4-launchd`)
 
-- [ ] **F6-T1** `/chats [n]`, `/open <chat>`, `/back` (prompt `Juan › `) · Agente: orquestador · Deps: F5-T11 · Aceptación: lista numerada; abrir cambia prompt; `/back` lo restaura.
-- [ ] **F6-T2** `/r <n> <texto>` (responder al mensaje n) y `/react <n> <emoji>` · Agente: orquestador · Deps: F6-T1 · Aceptación: cita/reacción llega al daemon con `request_id`; n inválido da error claro.
-- [ ] **F6-T3** `/search <texto>` (FTS5) y `/history [n]` · Agente: orquestador · Deps: F6-T1, F1-T5 · Aceptación: resultados ordenados y acotados; consulta con caracteres especiales no rompe FTS.
-- [ ] **F6-T4** `/mute <chat> <dur>` (ej. 30m, 8h, 1d) · Agente: orquestador · Deps: F6-T1 · Aceptación: duración parseada; chat silenciado no notifica; expira solo.
-- [ ] **F6-T5** `/help` y `/quit` · Agente: bulk-agent · Deps: F6-T1 · Aceptación: `/help` lista todos los comandos; `/quit` sale con código 0.
-- [ ] **F6-T6** Notificaciones osascript (desactivables por config), escapado seguro del contenido · Agente: orquestador · Deps: F6-T4 · Aceptación: sin inyección AppleScript con comillas/backslashes; respeta mute y desactivación.
-- [ ] **F6-T7** `wsp send <chat> <texto>` no interactivo · Agente: orquestador · Deps: F5-T7 · Aceptación: exit 0 al confirmar, !=0 con motivo; resolución de chat ambigua falla explícitamente.
-- [ ] **F6-T8** `wsp tail [chat]` (stream a stdout, apto para pipes) · Agente: orquestador · Deps: F5-T4 · Aceptación: sin color en no-TTY; termina limpio con SIGINT/SIGPIPE.
-- [ ] **F6-T9** Tests de comandos, send, tail y notificaciones (osascript simulado) · Agente: bulk-agent · Deps: F6-T8 · Aceptación: tests en verde.
-- [ ] **F6-T10** README/man con uso, instalación y comandos · Agente: bulk-agent · Deps: F6-T8 · Aceptación: cubre pair, daemon, REPL, send, tail.
-- [ ] **F6-T11** Refactor de fases 5-6: duplicación, async bloqueante, cancelación, latencia p50/p95 antes/después, sin cambio de comportamiento · Agente: refactor-agent · Deps: F6-T9 · Aceptación: tests intactos en verde; métricas en Bitácora.
-- [ ] **F6-T12** Gates en verde · Agente: orquestador · Deps: F6-T11 · Aceptación: 4 comandos exit 0.
-- [ ] **F6-T13** security-reviewer sobre `git diff main...HEAD` · Agente: security-reviewer · Deps: F6-T12 · Aceptación: sin bloqueantes (osascript, argv, PII).
-- [ ] **F6-T14** PR fase 6 · Agente: orquestador · Deps: F6-T13 · Aceptación: PR abierto.
-- [ ] **F6-T15** Actualizar TASK_PLAN.md (cierre) · Agente: planner · Deps: F6-T14 · Aceptación: plan al día.
+- [ ] **F4.1** Generador de plist (`KeepAlive`, `RunAtLoad`, logs, entorno; sin secretos) · Agente: orquestador · Deps: F3.14 · Aceptación: `uv run pytest tests/cli/test_plist.py -q` y `plutil -lint <plist generado>`
+- [ ] **F4.2** `wsp daemon install` (idempotente, `launchctl bootstrap gui/<uid>`) · Agente: orquestador · Deps: F4.1 · Aceptación: `uv run pytest tests/cli/test_daemon_install.py -q`
+- [ ] **F4.3** `wsp daemon uninstall` (bootout + borra plist, idempotente) · Agente: orquestador · Deps: F4.2 · Aceptación: `uv run pytest tests/cli/test_daemon_uninstall.py -q`
+- [ ] **F4.4** `wsp daemon status` (launchd + ping socket + conexión WhatsApp; exit code por caso) · Agente: orquestador · Deps: F4.2 · Aceptación: `uv run pytest tests/cli/test_daemon_status.py -q`
+- [ ] **F4.5** `wsp daemon logs` (`-f`, `-n`, logs rotados, sin contenido) · Agente: orquestador · Deps: F4.2 · Aceptación: `uv run pytest tests/cli/test_daemon_logs.py -q`
+- [ ] **F4.6** Tests de launchd con `launchctl` simulado · Agente: bulk-agent · Deps: F4.5 · Aceptación: `uv run pytest tests/cli -q` sin tocar launchd real
+- [ ] **F4.7** Gates en verde · Agente: orquestador · Deps: F4.6 · Aceptación: `uv run pytest && uv run ruff check && uv run ruff format --check && uv run mypy wsp`
+- [ ] **F4.8** Refactor fases 1–4 (duplicación, async bloqueante, cancelación; latencia p50/p95 antes/después; sin cambio de comportamiento) · Agente: refactor-agent · Deps: F4.7 · Aceptación: `uv run pytest -q` idéntico antes/después; métricas en Bitácora
+- [ ] **F4.9** Gates tras refactor · Agente: orquestador · Deps: F4.8 · Aceptación: `uv run pytest && uv run ruff check && uv run ruff format --check && uv run mypy wsp`
+- [ ] **F4.10** security-reviewer sobre `git diff main...HEAD` · Agente: security-reviewer · Deps: F4.9 · Aceptación: sin bloqueantes (plist, permisos, rutas)
+- [ ] **F4.11** PR fase 4 · Agente: orquestador · Deps: F4.10 · Aceptación: `gh pr view --json state,mergeable`
+- [ ] **F4.12** Cierre: actualizar TASK_PLAN.md · Agente: planner · Deps: F4.11 · Aceptación: sin `[~]` en fase 4
+
+---
+
+## Fase 5 — REPL en vivo (rama `phase-5-repl`)
+
+- [ ] **F5.1** REPL base: `PromptSession` + `patch_stdout`, prompt `› `, Ctrl-C/Ctrl-D limpios · Agente: orquestador · Deps: F4.12 · Aceptación: `uv run pytest tests/cli/test_repl_base.py -q`
+- [ ] **F5.2** Formato `[14:02] Juan › hola`, `[14:02] Familia / Ana › …`, estados ✓ ✓✓ ✗(motivo) · Agente: orquestador · Deps: F5.1 · Aceptación: `uv run pytest tests/cli/test_format.py -q`
+- [ ] **F5.3** `NO_COLOR` y `--no-color` · Agente: orquestador · Deps: F5.2 · Aceptación: `uv run pytest tests/cli/test_no_color.py -q` (sin ANSI)
+- [ ] **F5.4** Conexión al socket y bucle de eventos en vivo · Agente: orquestador · Deps: F5.1, F2.5 · Aceptación: `uv run pytest tests/cli/test_live_events.py -q`
+- [ ] **F5.5** Relleno al reconectar (`since=<último ts>`) sin pérdidas ni duplicados · Agente: orquestador · Deps: F5.4, F3.8 · Aceptación: `uv run pytest tests/cli/test_reconnect_backfill.py -q`
+- [ ] **F5.6** Indicador de conexión y mensaje claro sin daemon (sugiere `wsp daemon install`) · Agente: orquestador · Deps: F5.4 · Aceptación: `uv run pytest tests/cli/test_no_daemon.py -q` (sin traceback)
+- [ ] **F5.7** Envío de texto desde chat abierto con `request_id` · Agente: orquestador · Deps: F5.4, F3.5 · Aceptación: `uv run pytest tests/cli/test_repl_send.py -q`
+- [ ] **F5.8** Tests del REPL con daemon falso · Agente: bulk-agent · Deps: F5.7 · Aceptación: `uv run pytest tests/cli -q`
+- [ ] **F5.9** Gates en verde · Agente: orquestador · Deps: F5.8 · Aceptación: `uv run pytest && uv run ruff check && uv run ruff format --check && uv run mypy wsp`
+- [ ] **F5.10** security-reviewer sobre `git diff main...HEAD` · Agente: security-reviewer · Deps: F5.9 · Aceptación: sin bloqueantes (escapes de terminal en contenido entrante)
+- [ ] **F5.11** PR fase 5 · Agente: orquestador · Deps: F5.10 · Aceptación: `gh pr view --json state,mergeable`
+- [ ] **F5.12** Cierre: actualizar TASK_PLAN.md · Agente: planner · Deps: F5.11 · Aceptación: sin `[~]` en fase 5
+
+---
+
+## Fase 6 — Comandos, notificaciones, send/tail (rama `phase-6-comandos`)
+
+- [ ] **F6.1** `/chats [n]`, `/open <chat>` (autocompletado difuso con rapidfuzz), `/back` · Agente: orquestador · Deps: F5.12 · Aceptación: `uv run pytest tests/cli/test_cmd_chats.py -q`
+- [ ] **F6.2** `/r <n> <texto>` y `/react <n> <emoji>` · Agente: orquestador · Deps: F6.1 · Aceptación: `uv run pytest tests/cli/test_cmd_reply_react.py -q`
+- [ ] **F6.3** `/search <texto>` (FTS5, consulta con caracteres especiales segura) y `/history [n]` · Agente: orquestador · Deps: F6.1, F1.5 · Aceptación: `uv run pytest tests/cli/test_cmd_search_history.py -q`
+- [ ] **F6.4** `/mute <chat> <dur>` (30m, 8h, 1d; expira solo) · Agente: orquestador · Deps: F6.1 · Aceptación: `uv run pytest tests/cli/test_cmd_mute.py -q`
+- [ ] **F6.5** `/help` y `/quit` · Agente: bulk-agent · Deps: F6.1 · Aceptación: `uv run pytest tests/cli/test_cmd_help_quit.py -q`
+- [ ] **F6.6** Notificaciones osascript (desactivables, escapado seguro, respetan mute) · Agente: orquestador · Deps: F6.4 · Aceptación: `uv run pytest tests/cli/test_notify.py -q` (sin inyección AppleScript)
+- [ ] **F6.7** `wsp send <chat> <texto>` (exit 0 al confirmar; ambigüedad falla) · Agente: orquestador · Deps: F5.7 · Aceptación: `uv run pytest tests/cli/test_send_cmd.py -q`
+- [ ] **F6.8** `wsp tail [chat]` (apto para pipes, sin color en no-TTY, SIGINT/SIGPIPE limpios) · Agente: orquestador · Deps: F5.4 · Aceptación: `uv run pytest tests/cli/test_tail_cmd.py -q`
+- [ ] **F6.9** Tests de comandos, send, tail y notificaciones (osascript simulado) · Agente: bulk-agent · Deps: F6.8 · Aceptación: `uv run pytest tests/cli -q`
+- [ ] **F6.10** README/man: pair, daemon, REPL, send, tail · Agente: bulk-agent · Deps: F6.8 · Aceptación: `grep -cE "wsp (pair|daemon|send|tail)" README.md` ≥ 4
+- [ ] **F6.11** Gates en verde · Agente: orquestador · Deps: F6.9, F6.10 · Aceptación: `uv run pytest && uv run ruff check && uv run ruff format --check && uv run mypy wsp`
+- [ ] **F6.12** Refactor fases 5–6 (duplicación, async bloqueante, cancelación; latencia p50/p95 antes/después; sin cambio de comportamiento) · Agente: refactor-agent · Deps: F6.11 · Aceptación: `uv run pytest -q` idéntico antes/después; métricas en Bitácora
+- [ ] **F6.13** Gates tras refactor · Agente: orquestador · Deps: F6.12 · Aceptación: `uv run pytest && uv run ruff check && uv run ruff format --check && uv run mypy wsp`
+- [ ] **F6.14** security-reviewer sobre `git diff main...HEAD` · Agente: security-reviewer · Deps: F6.13 · Aceptación: sin bloqueantes (osascript, argv, PII)
+- [ ] **F6.15** PR fase 6 · Agente: orquestador · Deps: F6.14 · Aceptación: `gh pr view --json state,mergeable`
+- [ ] **F6.16** Cierre: actualizar TASK_PLAN.md · Agente: planner · Deps: F6.15 · Aceptación: `grep -c "^- \[ \]\|^- \[~\]" TASK_PLAN.md` = 0
 
 ---
 

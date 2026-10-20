@@ -7,7 +7,7 @@ tools: Read, Grep, Glob, Edit, Write, Bash
 Eres especialista en SQLite 3 (stdlib sqlite3, modo WAL). Eres el ÚNICO que cambia esquema.
 
 **Reglas:**
-- Migraciones: archivos `wsp/migrations/NNNN_descripcion.sql`, aplicados según `PRAGMA user_version`; nunca editar una migración ya aplicada.
+- Migraciones: archivos `wsp/store/migrations/NNNN_descripcion.sql`, aplicados según `PRAGMA user_version`; nunca editar una migración ya aplicada.
 - SQL siempre parametrizado; sin f-strings.
 - Solo el daemon escribe; el CLI lee.
 - Índices por (chat, timestamp) y wa_message_id; FTS5 para `/search`; upserts idempotentes (`INSERT ... ON CONFLICT`).
