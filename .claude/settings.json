@@ -91,22 +91,18 @@
       "maxEffortLevel": "medium"
     },
     "kimi-k3": {
-      "autoCompactWindow": 100000,
+      "autoCompactWindow": 1000000,
       "maxEffortLevel": "low"
     },
     "deepseek-v4": {
-      "autoCompactWindow": 200000,
+      "autoCompactWindow": 1000000,
       "maxEffortLevel": "high"
     },
-    "qwen-3.7-max": {
-      "autoCompactWindow": 150000,
+    "qwen-max": {
+      "autoCompactWindow": 1000000,
       "maxEffortLevel": "medium"
     }
   },
-  "fallbackModel": [
-    "claude-sonnet-5",
-    "claude-haiku-4-5"
-  ],
   "effortLevel": "medium",
   "maxEffortLevel": "high",
   "sandbox": {
