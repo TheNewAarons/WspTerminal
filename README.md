@@ -92,7 +92,7 @@ En un grupo, `@nombre` menciona a un miembro (también en `/r` y `wsp send`):
 Familia › @ana nos vemos a las 8
 ```
 
-Coincide con palabras del nombre (sin distinguir mayúsculas ni acentos) o con el final del número (`@4986`). Si hay varios candidatos, el envío se cancela y se listan; escribe más letras o el número. Sin coincidencia, `@x` se envía como texto literal.
+Al escribir `@` en un grupo abierto aparece la lista de miembros (se filtra mientras escribes; elige con ↑/↓ y Tab o Enter). Sin lista también funciona: coincide con palabras del nombre (sin distinguir mayúsculas ni acentos) o con el final del número (`@4986`). Si hay varios candidatos, el envío se cancela y se listan; escribe más letras o el número. Sin coincidencia, `@x` se envía como texto literal.
 
 ### Estados de envío
 

@@ -46,6 +46,26 @@ def _candidates(token: str, members: list[Member]) -> list[Member]:
     return exact or [m for m, ws in words if any(w.startswith(t) for w in ws)]
 
 
+def _handle(jid: str, name: str | None, members: list[Member]) -> str:
+    """Texto que va tras `@` y resuelve sin ambigüedad a este miembro."""
+    for word in (name or "").split():
+        w = word.strip(".,;:!?()[]{}\"'")
+        if _TOKEN.fullmatch(f"@{w}") and [m[0] for m in _candidates(w, members)] == [jid]:
+            return w
+    return _user(jid)
+
+
+def suggestions(query: str, members: list[Member]) -> list[tuple[str, str]]:
+    """(handle, nombre visible) de los miembros que coinciden con lo escrito tras `@`."""
+    q = _fold(query)
+    out: list[tuple[str, str]] = []
+    for jid, name in members:
+        label = name or _user(jid)
+        if q in _fold(label) or (q.isdigit() and q in _user(jid)):
+            out.append((_handle(jid, name, members), label))
+    return sorted(out, key=lambda s: _fold(s[1]))
+
+
 def has_mention_token(text: str) -> bool:
     return _TOKEN.search(text) is not None
 

@@ -97,6 +97,7 @@ class Repl:
         self.chats: dict[str, ChatUpdated] = {}
         self.listing: list[str] = []  # jids de la última salida de /chats (índice = n - 1)
         self.open_jid: str | None = None
+        self.group_members: dict[str, list[mentions.Member]] = {}  # para autocompletar `@`
         self.view: list[MessageNew] = []  # mensajes numerados del chat abierto (n = índice + 1)
         self.account: AccountState | None = None
         self.account_seen = asyncio.Event()
@@ -351,6 +352,21 @@ class Repl:
                 )
             )
 
+    def _prefetch_members(self, jid: str) -> None:
+        """Carga los miembros del grupo en segundo plano (sin ruido si falla)."""
+        if not jid.endswith(mentions.GROUP_SUFFIX):
+            return
+        task = asyncio.ensure_future(self._load_members(jid))
+        self._tasks.add(task)
+        task.add_done_callback(self._task_done)
+
+    async def _load_members(self, jid: str) -> None:
+        try:
+            res = await self._client.request(Members(chat_jid=jid))
+            self.group_members[jid] = [(str(m["jid"]), m.get("name")) for m in res["members"]]
+        except (RemoteError, ConnectionLost, RequestTimeout, KeyError, TypeError, AttributeError):
+            return
+
     async def _members(self, chat_jid: str) -> list[mentions.Member] | None:
         res = await self._call(Members(chat_jid=chat_jid))
         if res is None:
@@ -450,6 +466,7 @@ class Repl:
         if jid is None:
             return
         self.open_jid = jid
+        self._prefetch_members(jid)
         await self._show_history(jid, commands.DEFAULT_HISTORY)
         await self._call(MarkRead(chat_jid=jid))
 
@@ -608,9 +625,10 @@ async def run(
                 session = PromptSession(
                     history=_history_file(),
                     completer=WspCompleter(
-                        lambda: [c.title for c in repl.chats.values() if c.title]
+                        lambda: [c.title for c in repl.chats.values() if c.title],
+                        lambda: repl.group_members.get(repl.open_jid or "", []),
                     ),
-                    complete_while_typing=False,
+                    complete_while_typing=True,
                 )
             with patch_stdout(raw=True):
                 repl.note("conectado. /help para ver comandos.")
