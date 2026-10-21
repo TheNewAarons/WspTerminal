@@ -5,6 +5,7 @@ from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
 from typing import Any
 
+from wsp.daemon.names import NameEntry
 from wsp.daemon.session import EventSink, QrHandler, SendResult
 
 ns = SimpleNamespace
@@ -78,6 +79,7 @@ class FakeClient:
         self.connect_script: list[BaseException | None] = []
         self.after_connect: Callable[[FakeClient], Awaitable[None]] | None = None
         self.send_errors: list[BaseException] = []
+        self.names: list[NameEntry] = []
         self.phone_code = "ABCD-1234"
         self.phones: list[str] = []
         self.disconnect_error: BaseException | None = None
@@ -132,6 +134,9 @@ class FakeClient:
             raise self.send_errors.pop(0)
         self._n += 1
         return SendResult(wa_id=f"WA{self._n}", ts=1_700_000_000)
+
+    async def fetch_names(self) -> list[NameEntry]:
+        return list(self.names)
 
     async def pair_phone(self, phone: str) -> str:
         self.phones.append(phone)

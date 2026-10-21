@@ -17,6 +17,7 @@ from typing import Any, Final, Protocol
 
 from wsp import paths
 from wsp.daemon.config import ReconnectConfig
+from wsp.daemon.names import NameEntry
 from wsp.daemon.ts import norm_ts
 from wsp.protocol.models import AccountState
 
@@ -95,6 +96,8 @@ class WaClient(Protocol):
         self, chat_jid: str, wa_id: str, author_jid: str | None, emoji: str
     ) -> SendResult: ...
     async def pair_phone(self, phone: str) -> str: ...
+    async def fetch_names(self) -> list[NameEntry]:
+        """Nombres de contactos guardados y de grupos."""
 
 
 def secure_session_files(path: Path | None = None) -> None:
@@ -154,8 +157,10 @@ class Session:
         rand: Callable[[], float] = random.random,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         session_file: Path | None = None,
+        on_connected: Callable[[], None] | None = None,
     ) -> None:
         self._client = client
+        self._on_connected = on_connected
         self._emit_state = emit_state
         self._sink = sink
         self._sleep = sleep
@@ -191,6 +196,8 @@ class Session:
             if kind == "ConnectedEv":
                 self._backoff.reset()
                 self.set_state("connected")
+                if self._on_connected is not None:
+                    self._on_connected()
             elif kind == "DisconnectedEv":
                 self.set_state("disconnected", "closed")
             elif kind == "LoggedOutEv":
@@ -353,3 +360,18 @@ class NeonizeClient:
                     raise
                 await asyncio.sleep(PAIR_PHONE_DELAY)
         raise AssertionError("inalcanzable")
+
+    async def fetch_names(self) -> list[NameEntry]:
+        from wsp.daemon.events import jid_str
+
+        out: list[NameEntry] = []
+        for c in await self._c.contact.get_all_contacts():
+            jid, info = jid_str(c.JID), c.Info
+            name = info.FullName or info.PushName or info.BusinessName or info.FirstName
+            if jid and name:
+                out.append(NameEntry(jid, str(name)))
+        for g in await self._c.get_joined_groups():
+            jid, name = jid_str(g.JID), str(getattr(g.GroupName, "Name", "") or "")
+            if jid and name:
+                out.append(NameEntry(jid, name))
+        return out

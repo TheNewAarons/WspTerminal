@@ -225,6 +225,15 @@ def upsert_chat(
     )
 
 
+def set_chat_title(conn: sqlite3.Connection, jid: str, title: str) -> bool:
+    """Fija el título de un chat que ya existe; no crea chats. True si había fila."""
+    cur = conn.execute(
+        "UPDATE chats SET title = ? WHERE jid = ? AND title IS NOT ?", (title, jid, title)
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
 def upsert_contact(
     conn: sqlite3.Connection,
     jid: str,

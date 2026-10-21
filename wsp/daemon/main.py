@@ -14,6 +14,7 @@ from wsp import __version__, paths
 from wsp.daemon.config import Config, ConfigError, load_config
 from wsp.daemon.events import Bridge
 from wsp.daemon.logsetup import configure_logging
+from wsp.daemon.names import NameSync
 from wsp.daemon.outbox import Commands, Outbox
 from wsp.daemon.session import (
     EXIT_ALREADY_RUNNING,
@@ -94,6 +95,7 @@ async def serve(
     stopper: asyncio.Task[bool] | None = None
     outbox: Outbox | None = None
     session: Session | None = None
+    names: NameSync | None = None
     try:
         await writer.run(migrate.migrate)
         recovered = await writer.run(repo.outbox_recover)
@@ -106,7 +108,14 @@ async def serve(
 
         client = client_factory()
         bridge = Bridge(writer, emit)
-        session = Session(client, cfg.reconnect, emit, bridge.handle)
+        names = NameSync(client, writer)
+
+        async def sink(kind: str, ev: Any) -> None:
+            await bridge.handle(kind, ev)
+            if kind == "HistorySyncEv":
+                names.request()
+
+        session = Session(client, cfg.reconnect, emit, sink, on_connected=names.request)
         outbox = Outbox(writer, client, cfg.outbox, emit)
         server = Server(paths.socket_path(), Commands(writer, outbox), sqlite_backfill())
         await server.start()
@@ -127,6 +136,8 @@ async def serve(
             loop.remove_signal_handler(sig)
         try:
             await _cancel(stopper, maint_task)
+            if names is not None:
+                await names.aclose()
             # Drenar outbox con la sesión viva; luego desconectar y cerrar el socket.
             if outbox is not None:
                 with contextlib.suppress(Exception):
