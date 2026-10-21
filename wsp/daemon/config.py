@@ -38,6 +38,7 @@ class Config(_Section):
     reconnect: ReconnectConfig = ReconnectConfig()
     log: LogConfig = LogConfig()
     retention_days: int = Field(default=365, ge=1, le=36500)
+    notifications: bool = True  # notificaciones de macOS del REPL (`wsp`)
 
 
 def load_config(path: Path | None = None) -> Config:

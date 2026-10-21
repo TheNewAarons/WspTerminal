@@ -11,14 +11,23 @@ import pytest
 import structlog
 
 from wsp.store import db, migrate
+from wsp.store.writer import Writer
 
 
 @pytest.fixture
 def conn(tmp_path: Path) -> Iterator[sqlite3.Connection]:
-    c = db.open_write(tmp_path / "wsp.db")
+    c = db.open_write(tmp_path / "wsp.db", check_same_thread=False)  # lo usa el hilo del Writer
     migrate.migrate(c)
     yield c
     c.close()
+
+
+@pytest.fixture
+def writer(conn: sqlite3.Connection) -> Iterator[Writer]:
+    """Writer sobre `conn`: los trabajos corren en su hilo; los tests solo leen entre awaits."""
+    w = Writer.adopt(conn)
+    yield w
+    w.shutdown()
 
 
 @pytest.fixture

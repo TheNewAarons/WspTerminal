@@ -42,6 +42,7 @@ from wsp.protocol.models import (
     to_envelope,
 )
 from wsp.protocol.peer import peer_uid
+from wsp.protocol.rows import message_event
 from wsp.store import db, repo
 
 log = logging.getLogger(__name__)
@@ -86,22 +87,7 @@ def sqlite_backfill(db_path: Path | None = None) -> BackfillSource:
         skipped = 0
         for r in rows:
             try:
-                events.append(
-                    MessageNew(
-                        chat_jid=r.chat_jid,
-                        wa_id=r.wa_id,
-                        sender_jid=r.sender_jid,
-                        from_me=r.from_me,
-                        ts=r.ts,
-                        kind=r.kind,
-                        body=r.body,
-                        quoted_wa_id=r.quoted_wa_id,
-                        status=r.status,
-                        error=r.error,
-                        edited_at=r.edited_at,
-                        deleted_at=r.deleted_at,
-                    )
-                )
+                events.append(message_event(r))
             except ValidationError:  # fila fuera de los límites del protocolo
                 skipped += 1
         if skipped:
@@ -164,6 +150,7 @@ class Server:
         self._server: asyncio.Server | None = None
         self._conns: set[_Conn] = set()
         self._tasks: set[asyncio.Task[None]] = set()
+        self._handlers: set[asyncio.Task[Any]] = set()  # una tarea por conexión aceptada
         self._account: AccountState | None = None
         self._next_id = 0
 
@@ -194,8 +181,12 @@ class Server:
             server.close()
         for c in list(self._conns):
             self._abort(c)
-        for t in list(self._tasks):
+        # Cancelar y esperar (no dejar tareas huérfanas): handlers de conexión, writers, farewells.
+        pending = [*self._handlers, *self._tasks]
+        for t in pending:
             t.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
         if server is not None:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(server.wait_closed(), 2.0)
@@ -246,6 +237,9 @@ class Server:
             log.warning("conexión rechazada code=too_many_connections")
             writer.transport.abort()
             return
+        if (task := asyncio.current_task()) is not None:
+            self._handlers.add(task)
+            task.add_done_callback(self._handlers.discard)
         self._next_id += 1
         c = _Conn(self._next_id, reader, writer, asyncio.Queue(self._queue_size))
         self._conns.add(c)

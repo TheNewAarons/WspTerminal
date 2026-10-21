@@ -8,9 +8,9 @@ dependencies = [
     "pydantic>=2,<3",
     "prompt_toolkit>=3,<4",
     "keyring>=25,<26",
-    "structlog>=25",
+    "structlog>=25,<27",
     "rapidfuzz>=3,<4",
-    "qrcode>=8",
+    "qrcode>=8,<9",
 ]
 
 [project.scripts]

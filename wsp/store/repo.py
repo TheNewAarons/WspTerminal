@@ -94,6 +94,8 @@ class ChatRow:
     archived: bool
     muted_until: int
     pinned: bool
+    alias: str | None = None
+    push_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +147,8 @@ def _chat(row: sqlite3.Row) -> ChatRow:
         archived=bool(row["archived"]),
         muted_until=row["muted_until"],
         pinned=bool(row["pinned"]),
+        alias=row["alias"] if "alias" in row.keys() else None,
+        push_name=row["push_name"] if "push_name" in row.keys() else None,
     )
 
 
@@ -251,8 +255,10 @@ def upsert_contact(
 
 def list_chats(conn: sqlite3.Connection, limit: int = 50) -> list[ChatRow]:
     rows = conn.execute(
-        "SELECT jid, kind, title, unread_count, last_message_at, archived, muted_until, pinned "
-        "FROM chats WHERE archived = 0 ORDER BY last_message_at DESC LIMIT ?",
+        "SELECT c.jid, c.kind, c.title, c.unread_count, c.last_message_at, c.archived, "
+        "c.muted_until, c.pinned, k.alias, k.push_name "
+        "FROM chats c LEFT JOIN contacts k ON k.jid = c.jid "
+        "WHERE c.archived = 0 ORDER BY c.pinned DESC, c.last_message_at DESC LIMIT ?",
         (_limit(limit),),
     ).fetchall()
     return [_chat(r) for r in rows]
@@ -483,6 +489,15 @@ def last_messages(conn: sqlite3.Connection, chat_jid: str, n: int = 50) -> list[
         (chat_jid, _limit(n)),
     ).fetchall()
     return [_msg(r) for r in reversed(rows)]
+
+
+def message_sender(conn: sqlite3.Connection, chat_jid: str, wa_id: str) -> tuple[str | None] | None:
+    """None si el mensaje no existe; si existe, `(sender_jid,)` (sender None = propio/directo)."""
+    row = conn.execute(
+        "SELECT sender_jid FROM messages WHERE chat_jid = ? AND wa_id = ? LIMIT 1",
+        (chat_jid, wa_id),
+    ).fetchone()
+    return None if row is None else (row["sender_jid"],)
 
 
 def fts_query(text: str) -> str:

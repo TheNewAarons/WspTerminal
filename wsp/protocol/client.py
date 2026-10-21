@@ -110,7 +110,7 @@ class Client:
 
     async def start(self) -> None:
         if self._task is None:
-            self._task = asyncio.create_task(self._run())
+            self._task = asyncio.create_task(self._run(), name="wsp-client")
 
     async def stop(self) -> None:
         task, self._task = self._task, None

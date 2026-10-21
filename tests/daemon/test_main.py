@@ -33,7 +33,7 @@ async def test_serve_persists_incoming_and_shuts_down_cleanly(
     real_open = db.open_write
 
     def capture() -> sqlite3.Connection:
-        c = real_open()
+        c = real_open(check_same_thread=False)  # cerrada en el hilo del writer; se verifica aquí
         conns.append(c)
         return c
 
@@ -78,6 +78,7 @@ async def test_serve_persists_incoming_and_shuts_down_cleanly(
     await asyncio.wait_for(task, 10)
     assert not sock.exists()
     assert client.disconnects >= 1
+    assert asyncio.all_tasks() == {asyncio.current_task()}  # sin tareas huérfanas
     assert len(conns) == 1
     with pytest.raises(sqlite3.ProgrammingError):
         conns[0].execute("SELECT 1")
