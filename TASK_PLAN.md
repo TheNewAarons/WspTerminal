@@ -184,9 +184,21 @@ Diferidos de la revisión de seguridad de Fase 3 (0 bloqueantes; destino entre p
 - [x] **F6.6** `wsp send`, `wsp tail`, `wsp config` (SIGPIPE, `--json`, `--wait-delivered`, códigos de salida 0/1/2/4/5) · Agente: orquestador · Deps: F6.4 · Aceptación: `uv run pytest tests/cli -q`
 - [x] **F6.7** Tests de comandos, notify, send/tail y REPL f6; README completo · Agente: bulk-agent · Deps: F6.6 · Aceptación: `uv run pytest tests/cli -q`
 - [x] **F6.8** Refactor fases 5–6: helpers compartidos, `aclose` de tareas, latencia sin regresión (ver Bitácora) · Agente: refactor-agent · Deps: F6.7 · Aceptación: `uv run pytest -q` idéntico antes/después; métricas en Bitácora
-- [x] **F6.9** security-reviewer sobre `git diff main...HEAD`: 0 bloqueantes/altos; medios 1 (historial guardaba `/r` y `/search`; ahora solo navegación) y 2 (`tail --json` con `ensure_ascii=True`) corregidos · Agente: security-reviewer · Deps: F6.8 · Aceptación: sin bloqueantes
-- [ ] **F6.10** PR fase 6 (`feat/f6-commands`) · Agente: orquestador · Deps: F6.9 · Aceptación: `gh pr view --json state,mergeable`
-- [ ] **F6.11** Cierre: actualizar TASK_PLAN.md · Agente: planner · Deps: F6.10 · Aceptación: sin `[~]` en fase 6
+- [x] **F6.9** security-reviewer sobre `git diff main...HEAD`: 0 bloqueantes, 0 altos, 3 medios (2 corregidos: cotas de `structlog`/`qrcode`, LaunchAgents en 700; 1 abierto: CVEs sin auditar, ver F6.16), 3 bajos (F6.17–F6.19) · Agente: security-reviewer · Deps: F6.8 · Aceptación: sin bloqueantes
+- [x] **F6.10** PR #3 (`feat/f6-commands`, acumula fases 0–5, ver Desviaciones) · Agente: orquestador · Deps: F6.9 · Aceptación: `gh pr view 3 --json state,mergeable`
+- [x] **F6.11** Cierre: actualizar TASK_PLAN.md · Agente: planner · Deps: F6.10 · Aceptación: sin `[~]` en fase 6
+
+Desviaciones respecto de CLAUDE.md (registradas al cierre de F6):
+
+- Ramas `feat/fN-*` (f0-bootstrap, f1-store, f2-protocol, f3-daemon, f5-repl, f6-commands) en vez de `phase-N-<tema>`.
+- No hubo un PR por fase: main no tenía las fases previas, así que PR #3 acumula fases 0–5 además de la 6. F1.12, F2.9, F3.13 y F5.11 quedan cubiertos por PR #3.
+- `uv run pytest` requiere correr fuera del sandbox (sockets Unix); dentro del sandbox fallan los tests de socket.
+
+Tareas nuevas por revisión de seguridad F6 (deuda):
+
+- [ ] **F6.17** Test de modo `0o600` del socket (`wsp/protocol/server.py:167-174`); verificar con `stat` tras `Server.start()` · Agente: bulk-agent · Deps: F6.9 · Aceptación: `uv run pytest tests/protocol tests/daemon -q` (modo == 0o600)
+- [ ] **F6.18** Sanitizar/truncar stderr de launchctl antes de mostrarlo o loguearlo (`wsp/cli/daemon_cmd.py:33-35`): quitar control/ESC y limitar longitud · Agente: orquestador · Deps: F6.9 · Aceptación: `uv run pytest tests/cli -q` (stderr con ESC o muy largo sale limpio y truncado)
+- [ ] **F6.19** `fchmod(0o600)` sobre el fd del lockfile antes de `flock` (`wsp/daemon/session.py:47`) · Agente: orquestador · Deps: F6.9 · Aceptación: `uv run pytest tests/daemon/test_session.py -q` (lockfile 600 aun con umask permisivo)
 
 Pendientes bajos de la revisión de seguridad F6 (diferidos):
 
@@ -194,7 +206,7 @@ Pendientes bajos de la revisión de seguridad F6 (diferidos):
 - [ ] **F6.13** Notificación con solo remitente (opción de configuración) · Agente: orquestador · Deps: F6.3 · Aceptación: `uv run pytest tests/cli/test_notify.py -q`
 - [ ] **F6.14** Tope de stdin en bytes alineado con `MAX_TEXT` en `wsp send` · Agente: orquestador · Deps: F6.6 · Aceptación: `uv run pytest tests/cli -q` (stdin sobre el tope rechazado)
 - [ ] **F6.15** Validar propietario/permisos de `config.toml` · Agente: orquestador · Deps: F6.6 · Aceptación: `uv run pytest tests/cli -q` (archivo ajeno o con permisos abiertos se rechaza)
-- [ ] **F6.16** pip-audit fuera del sandbox (ver F3.36) · Agente: usuario · Deps: — · Aceptación: `uv export --no-dev | uvx pip-audit -r /dev/stdin`
+- [ ] **F6.16** Auditar CVEs con `uvx pip-audit` (ver F3.36) y añadir `pip-audit` al grupo dev de pyproject; la revisión se hizo sin red, queda sin auditar · Agente: usuario (ejecución) / orquestador (pyproject) · Deps: — · Aceptación: `uv export --no-dev | uvx pip-audit -r /dev/stdin` fuera del sandbox sin vulnerabilidades sin triar; `uv run pip-audit --version` funciona
 
 ---
 
@@ -213,4 +225,5 @@ Pendientes bajos de la revisión de seguridad F6 (diferidos):
 2026-10-20 · F3 · security-reviewer: 0 bloqueantes. Corregidos: umask+finally en pair, orden de apagado (outbox, sesión, socket), timeout sin reintento, format_exc_info antes de redact, not_found en react, lock antes de logging, SIGHUP, .gitignore. Diferidos: F3.28–F3.40.
 2026-10-20 · F5 · Fase 5 completada (security-reviewer corregido en 9749831). Diferidos: F5.13 (paginación por cursor), F5.14 (cursor monótono), F5.15 (filtro ESC final en `_emit`, hallazgo #8). F5.11 (PR) pendiente.
 2026-10-20 · F6 · Fase 6 hecha en `feat/f6-commands`; security-reviewer 0 bloqueantes/altos, medios 1 y 2 corregidos; bajos diferidos F6.12–F6.16. Refactor sin regresión: 200/s con render p50 1.23→1.19 ms, p95 2.12→2.17 ms; ráfaga con render p50 0.38→0.37 ms, p95 0.49→0.45 ms. Enfoques descartados: ninguno. F6.10 (PR) pendiente.
+2026-10-20 · F6 · Cierre F6: PR #3 abierto (acumula fases 0–5 + 6). Seguridad: 0 bloqueantes, 0 altos, 3 medios (2 corregidos), 3 bajos. Nuevas F6.17–F6.19; pip-audit (F6.16) sigue pendiente por falta de red. Desviaciones de ramas/PR/pytest en sección Fase 6.
 2026-10-20 · F3 · Decisión history-sync: persistir mensajes sin emitirlos, emitir solo ChatUpdated (evita inundar clientes; el relleno va por `since`). libmagic/ffmpeg requeridos para neonize real (no para tests).
