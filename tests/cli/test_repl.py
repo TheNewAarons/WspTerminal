@@ -137,8 +137,8 @@ async def test_text_without_open_chat_shows_help(client: Client, out: io.StringI
 async def test_chats_open_and_send(client: Client, out: io.StringIO, daemon: FakeDaemon) -> None:
     r = Repl(client, out, Palette(False), tz=UTC)
     await r.handle_line("/chats")
-    assert "1  Juan  (2 sin leer)" in out.getvalue()
-    assert "2  Familia  (grupo)" in out.getvalue()
+    assert "1  Juan (2)" in out.getvalue()
+    assert "2  Familia" in out.getvalue()
     await r.handle_line("/open 1")
     assert r.prompt() == "Juan › "
     text = out.getvalue()
@@ -171,7 +171,7 @@ async def test_bad_commands_and_stubs(client: Client, out: io.StringIO) -> None:
     assert "comando desconocido: /nada" in text
     assert "uso: /chats [n]" in text
     assert "uso: /open" in text
-    assert "/search: aún no disponible" in text
+    assert "sin resultados" in text
     assert "Sin chat abierto" in text
     assert await r.handle_line("/help") is True
     assert "/quit" in out.getvalue()

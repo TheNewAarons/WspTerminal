@@ -4,8 +4,9 @@ import asyncio
 import contextlib
 import os
 import sys
+import time
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import tzinfo
 from pathlib import Path
 from typing import Any, Final, TextIO
@@ -14,10 +15,10 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.patch_stdout import patch_stdout
 from pydantic import ValidationError
-from rapidfuzz import fuzz, process
 
 from wsp import paths
-from wsp.cli import daemon_cmd, render
+from wsp.cli import commands, daemon_cmd, notify, render
+from wsp.cli.completer import WspCompleter
 from wsp.cli.render import Palette
 from wsp.protocol.client import Client, ConnectionLost, RemoteError, RequestTimeout
 from wsp.protocol.models import (
@@ -34,7 +35,11 @@ from wsp.protocol.models import (
     MessageEdited,
     MessageNew,
     MessageStatus,
+    Mute,
+    React,
     Reaction,
+    Search,
+    SendReply,
     SendText,
 )
 
@@ -43,15 +48,13 @@ EXIT_UNREACHABLE: Final = 2
 EXIT_UNLINKED: Final = 3
 CONNECT_TIMEOUT: Final = 3.0
 ACCOUNT_WAIT: Final = 1.0
-DEFAULT_CHATS: Final = 30
-DEFAULT_HISTORY: Final = 20
 MAX_LIST: Final = 200
 SEEN_MAX: Final = 4096
 PROMPT_TITLE_MAX: Final = 24
 _UNLINKED: Final = frozenset({"pairing", "logged_out"})
-_FUZZY_CUTOFF: Final = 60
 
 Ask = Callable[[str], str]
+Notifier = Callable[[str, str], Awaitable[object]]
 
 
 class Repl:
@@ -64,14 +67,18 @@ class Repl:
         pal: Palette,
         *,
         tz: tzinfo | None = None,
+        notifier: Notifier | None = None,
     ) -> None:
         self._client = client
+        self._notifier = notifier
+        self._tasks: set[asyncio.Task[object]] = set()
         self._out = out
         self._pal = pal
         self._tz = tz
         self.chats: dict[str, ChatUpdated] = {}
         self.listing: list[str] = []  # jids de la última salida de /chats (índice = n - 1)
         self.open_jid: str | None = None
+        self.view: list[MessageNew] = []  # mensajes numerados del chat abierto (n = índice + 1)
         self.account: AccountState | None = None
         self.account_seen = asyncio.Event()
         self._msgs: OrderedDict[tuple[str, str], MessageNew] = OrderedDict()
@@ -151,6 +158,24 @@ class Repl:
         self._remember(m)
         if not known:  # una actualización de un mensaje ya impreso no se reimprime
             self._print_message(m)
+            self._maybe_notify(m)
+
+    def _maybe_notify(self, m: MessageNew) -> None:
+        """Notifica mensajes ajenos de chats no abiertos ni silenciados."""
+        if self._notifier is None or m.from_me or m.deleted_at is not None:
+            return
+        if m.chat_jid == self.open_jid:
+            return
+        chat = self.chats.get(m.chat_jid)
+        if chat is not None and chat.muted_until > time.time():
+            return
+        who = self.name_of(m.chat_jid)
+        body = render.one_line(m.body or f"[{m.kind}]")
+        if chat is not None and chat.kind == "group":
+            body = f"{self.name_of(m.sender_jid or m.chat_jid)}: {body}"
+        task = asyncio.ensure_future(self._notifier(who, body))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
 
     def _print_message(self, m: MessageNew) -> None:
         key = (m.chat_jid, m.wa_id)
@@ -164,9 +189,26 @@ class Repl:
         group = self.name_of(m.chat_jid) if chat is not None and chat.kind == "group" else None
         quoted = None if m.quoted_wa_id is None else self._msgs.get((m.chat_jid, m.quoted_wa_id))
         lines += render.render_message(
-            m, name_of=self.name_of, pal=self._pal, group_title=group, quoted=quoted, tz=self._tz
+            m,
+            name_of=self.name_of,
+            pal=self._pal,
+            group_title=group,
+            quoted=quoted,
+            tz=self._tz,
+            num=self._number(m),
         )
         self._emit(*lines)
+
+    def _number(self, m: MessageNew) -> int | None:
+        """Número del mensaje en la vista del chat abierto (se asigna al verlo por 1.ª vez)."""
+        if m.chat_jid != self.open_jid:
+            return None
+        for i, v in enumerate(self.view):
+            if v.wa_id == m.wa_id:
+                self.view[i] = m
+                return i + 1
+        self.view.append(m)
+        return len(self.view)
 
     def _on_status(self, s: MessageStatus) -> None:
         key = (s.chat_jid, s.wa_id)
@@ -217,31 +259,35 @@ class Repl:
 
     async def handle_line(self, line: str) -> bool:
         """Procesa una línea. False ⇒ salir."""
-        text = line.strip()
-        if not text:
-            return True
-        if not text.startswith("/"):
-            await self._send(text)
-            return True
-        cmd, _, arg = text[1:].partition(" ")
-        arg = arg.strip()
-        match cmd.lower():
-            case "quit" | "exit" | "q":
+        cmd = commands.parse(line)
+        match cmd:
+            case commands.Empty():
+                pass
+            case commands.Quit():
                 return False
-            case "help" | "h" | "?":
-                self._emit(*render.HELP_TEXT)
-            case "chats":
-                await self._cmd_chats(arg)
-            case "open":
-                await self._cmd_open(arg)
-            case "back":
+            case commands.Say():
+                await self._send(cmd.text)
+            case commands.Invalid():
+                self.error(cmd.message)
+            case commands.Help():
+                self._emit(*render.help_lines())
+            case commands.ShowChats():
+                await self._cmd_chats(cmd.n)
+            case commands.Open():
+                await self._cmd_open(cmd.query)
+            case commands.Back():
                 self.open_jid = None
-            case "history":
-                await self._cmd_history(arg)
-            case "r" | "react" | "search" | "mute":
-                self.note(f"/{cmd.lower()}: aún no disponible.")
-            case _:
-                self.error(f"comando desconocido: /{render.one_line(cmd)} (/help)")
+                self.view = []
+            case commands.ShowHistory():
+                await self._cmd_history(cmd.n)
+            case commands.Reply():
+                await self._cmd_reply(cmd)
+            case commands.ReactTo():
+                await self._cmd_react(cmd)
+            case commands.SearchFor():
+                await self._cmd_search(cmd.query)
+            case commands.MuteChat():
+                await self._cmd_mute(cmd)
         return True
 
     async def _call(self, cmd: Any) -> dict[str, Any] | None:
@@ -254,13 +300,39 @@ class Repl:
             self.error(f"sin respuesta del daemon ({type(e).__name__}); revisa `wsp daemon status`")
         return None
 
+    def _report_send(self, res: dict[str, Any] | None) -> None:
+        if res is not None and res.get("state") == "failed":
+            self.error(f"envío fallido: {render.one_line(str(res.get('error', '')))}")
+
     async def _send(self, text: str) -> None:
         if self.open_jid is None:
             self._emit(*render.HELP_NO_CHAT)
             return
-        res = await self._call(SendText(chat_jid=self.open_jid, text=text))
-        if res is not None and res.get("state") == "failed":
-            self.error(f"envío fallido: {render.one_line(str(res.get('error', '')))}")
+        self._report_send(await self._call(SendText(chat_jid=self.open_jid, text=text)))
+
+    def _target(self, n: int) -> MessageNew | None:
+        """Mensaje número `n` de la vista actual; avisa si no hay chat o n está fuera de rango."""
+        if self.open_jid is None:
+            self._emit(*render.HELP_NO_CHAT)
+            return None
+        if not 1 <= n <= len(self.view):
+            self.error(f"no hay mensaje {n} en la vista (1-{len(self.view)})")
+            return None
+        return self.view[n - 1]
+
+    async def _cmd_reply(self, cmd: commands.Reply) -> None:
+        target = self._target(cmd.n)
+        if target is not None:
+            self._report_send(
+                await self._call(
+                    SendReply(chat_jid=target.chat_jid, quoted_wa_id=target.wa_id, text=cmd.text)
+                )
+            )
+
+    async def _cmd_react(self, cmd: commands.ReactTo) -> None:
+        target = self._target(cmd.n)
+        if target is not None:
+            await self._call(React(chat_jid=target.chat_jid, wa_id=target.wa_id, emoji=cmd.emoji))
 
     async def _load_chats(self, limit: int) -> list[ChatUpdated]:
         res = await self._call(ListChats(limit=limit))
@@ -275,11 +347,11 @@ class Repl:
             self.chats[c.jid] = c
         return chats
 
-    async def _cmd_chats(self, arg: str) -> None:
-        n = _parse_count(arg, DEFAULT_CHATS)
-        if n is None:
-            self.error("uso: /chats [n]")
-            return
+    async def preload(self) -> None:
+        """Carga los chats para nombres y autocompletado (sin imprimir nada)."""
+        await self._load_chats(MAX_LIST)
+
+    async def _cmd_chats(self, n: int) -> None:
         chats = await self._load_chats(n)
         self.listing = [c.jid for c in chats]
         if not chats:
@@ -287,39 +359,36 @@ class Repl:
             return
         self._emit(*render.render_chat_list(chats, self._pal))
 
-    async def _cmd_open(self, arg: str) -> None:
-        if not arg:
-            self.error("uso: /open <n|nombre>")
-            return
-        jid = await self._resolve(arg)
-        if jid is None:
-            self.error(f"no encuentro el chat «{render.truncate(arg, 30)}» (/chats)")
-            return
-        self.open_jid = jid
-        await self._show_history(jid, DEFAULT_HISTORY)
-        await self._call(MarkRead(chat_jid=jid))
-
-    async def _resolve(self, arg: str) -> str | None:
-        if arg.isdigit():
-            i = int(arg)
-            if not self.listing:
-                await self._cmd_chats("")
-            return self.listing[i - 1] if 1 <= i <= len(self.listing) else None
+    async def _resolve(self, query: str) -> str | None:
+        """Chat para `query` (número o nombre). Imprime el motivo si no hay uno claro."""
         if not self.chats:
             await self._load_chats(MAX_LIST)
-        titles = {jid: c.title for jid, c in self.chats.items() if c.title}
-        best = process.extractOne(
-            arg, titles, scorer=fuzz.WRatio, score_cutoff=_FUZZY_CUTOFF, processor=str.lower
-        )
-        return None if best is None else str(best[2])
+        if query.strip().isdigit() and not self.listing:
+            await self._cmd_chats(commands.DEFAULT_CHATS)
+        match commands.resolve_chat(query, self.chats, self.listing):
+            case commands.Found(jid):
+                return jid
+            case commands.Ambiguous(jids):
+                self.listing = list(jids)
+                self.note(f"«{render.truncate(query, 30)}» es ambiguo; elige con /open <n>:")
+                self._emit(*render.render_chat_list([self.chats[j] for j in jids], self._pal))
+            case commands.OutOfRange(n, size):
+                self.error(f"no hay chat {n} en la lista" + (f" (1-{size})" if size else ""))
+            case _:
+                self.error(f"no encuentro el chat «{render.truncate(query, 30)}» (/chats)")
+        return None
 
-    async def _cmd_history(self, arg: str) -> None:
+    async def _cmd_open(self, query: str) -> None:
+        jid = await self._resolve(query)
+        if jid is None:
+            return
+        self.open_jid = jid
+        await self._show_history(jid, commands.DEFAULT_HISTORY)
+        await self._call(MarkRead(chat_jid=jid))
+
+    async def _cmd_history(self, n: int) -> None:
         if self.open_jid is None:
             self._emit(*render.HELP_NO_CHAT)
-            return
-        n = _parse_count(arg, DEFAULT_HISTORY)
-        if n is None:
-            self.error("uso: /history [n]")
             return
         await self._show_history(self.open_jid, n)
 
@@ -333,17 +402,37 @@ class Repl:
             self.error("respuesta inválida del daemon")
             return
         self._last_day = None  # el historial abre con su fecha
+        self.view = []
         for m in rows:
             self._remember(m)
             self._print_message(m)
         if not rows:
             self.note("sin mensajes todavía.")
 
+    async def _cmd_search(self, query: str) -> None:
+        res = await self._call(Search(q=query, limit=commands.TOP_SEARCH))
+        if res is None:
+            return
+        try:
+            hits = [MessageNew.model_validate(m) for m in res.get("messages", [])]
+        except (ValidationError, TypeError, ValueError, AttributeError):
+            self.error("respuesta inválida del daemon")
+            return
+        if not hits:
+            self.note("sin resultados.")
+            return
+        self.listing = [m.chat_jid for m in hits]  # `/open <n>` salta al chat del resultado
+        self._emit(*render.render_search_results(hits, self.name_of, self._pal, self._tz))
 
-def _parse_count(arg: str, default: int) -> int | None:
-    if not arg:
-        return default
-    return int(arg) if arg.isdigit() and 0 < int(arg) <= MAX_LIST else None
+    async def _cmd_mute(self, cmd: commands.MuteChat) -> None:
+        jid = await self._resolve(cmd.chat)
+        if jid is None:
+            return
+        until = 0 if cmd.seconds == 0 else int(time.time()) + cmd.seconds
+        if await self._call(Mute(chat_jid=jid, until=until)) is not None:
+            self.chats[jid] = self.chats[jid].model_copy(update={"muted_until": until})
+            verb = "silenciado" if until else "con sonido de nuevo"
+            self.note(f"{render.truncate(self.name_of(jid), 40)}: {verb}.")
 
 
 async def _pump(client: Client, repl: Repl) -> None:
@@ -415,6 +504,8 @@ async def run(
     ask: Ask = input,
     tz: tzinfo | None = None,
     socket: Path | None = None,
+    notifications: bool = True,
+    notifier: Notifier | None = None,
 ) -> int:
     """Abre el REPL. Códigos: 0 ok · 2 daemon sin respuesta · 3 cuenta sin vincular."""
     path = socket or paths.socket_path()
@@ -424,7 +515,9 @@ async def run(
         except ConnectionLost:
             offer_daemon_help(ask, out or sys.stdout)
             return EXIT_UNREACHABLE
-        repl = Repl(client, out, pal, tz=tz)
+        if notifier is None and notifications:
+            notifier = notify.notify
+        repl = Repl(client, out, pal, tz=tz, notifier=notifier if notifications else None)
         pump = asyncio.create_task(_pump(client, repl), name="wsp-pump")
         try:
             with contextlib.suppress(TimeoutError):
@@ -432,8 +525,15 @@ async def run(
             if repl.account is not None and repl.account.state in _UNLINKED:
                 (out or sys.stdout).write("wsp: la cuenta no está vinculada. Ejecuta `wsp pair`.\n")
                 return EXIT_UNLINKED
+            await repl.preload()
             if session is None:
-                session = PromptSession(history=_history_file())
+                session = PromptSession(
+                    history=_history_file(),
+                    completer=WspCompleter(
+                        lambda: [c.title for c in repl.chats.values() if c.title]
+                    ),
+                    complete_while_typing=False,
+                )
             with patch_stdout(raw=True):
                 repl.note("conectado. /help para ver comandos.")
                 return await run_loop(repl, session)

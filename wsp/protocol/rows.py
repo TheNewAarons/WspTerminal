@@ -32,6 +32,8 @@ def chat_event(c: repo.ChatRow) -> ChatUpdated:
         archived=c.archived,
         muted_until=c.muted_until,
         pinned=c.pinned,
+        alias=c.alias,
+        push_name=c.push_name,
     )
 
 

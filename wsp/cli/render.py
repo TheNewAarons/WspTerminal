@@ -15,6 +15,7 @@ from wsp.protocol.models import ChatUpdated, MessageNew, MessageStatus, Reaction
 
 QUOTE_MAX: Final = 60
 INDENT: Final = " " * 8
+NUM_WIDTH: Final = 3
 BULLET: Final = "›"
 
 # Paleta sobria de 8 colores ANSI (sin rojo: se reserva para errores).
@@ -219,6 +220,7 @@ def render_message(
     group_title: str | None = None,
     quoted: MessageNew | None = None,
     tz: tzinfo | None = None,
+    num: int | None = None,
 ) -> list[str]:
     """Líneas de un mensaje. `group_title` no nulo ⇒ `[hh:mm] Grupo / Autor › texto`.
 
@@ -230,7 +232,8 @@ def render_message(
     label = _label(who, who_jid, pal, mine=m.from_me)
     if group_title is not None:
         label = f"{pal.paint(truncate(group_title, 40), _BOLD)} / {label}"
-    head = f"{pal.dim(f'[{format_time(m.ts, tz)}]')} {label} {BULLET} "
+    prefix = f"{pal.dim(str(num).rjust(NUM_WIDTH))} " if num is not None else ""
+    head = f"{prefix}{pal.dim(f'[{format_time(m.ts, tz)}]')} {label} {BULLET} "
 
     lines = _body(m).split("\n")
     tail: list[str] = []
@@ -242,7 +245,8 @@ def render_message(
         lines[-1] = " ".join(p for p in (lines[-1], *tail) if p)
     if m.deleted_at is not None:
         lines[0] = pal.dim(lines[0])
-    out = [head + lines[0], *(INDENT + line for line in lines[1:])]
+    pad = " " * (len(prefix) if num is None else NUM_WIDTH + 1)
+    out = [head + lines[0], *(pad + INDENT + line for line in lines[1:])]
     if m.quoted_wa_id is not None:
         out.insert(0, render_quote(quoted, name_of, pal))
     return out
@@ -255,21 +259,39 @@ def render_reaction(r: Reaction, target: MessageNew | None, name_of: NameOf, pal
     return pal.dim(f"  {text}")
 
 
+def chat_name(c: ChatUpdated) -> str:
+    return truncate(c.title or c.alias or c.push_name or "", 40) or short_jid(c.jid)
+
+
 def render_chat_list(chats: Sequence[ChatUpdated], pal: Palette) -> list[str]:
-    """Lista numerada (desde 1) para `/chats`; marca no leídos y silenciados."""
+    """Lista numerada (desde 1) para `/chats`: `1  Juan (3) 🔇`."""
     width = len(str(len(chats)))
     out: list[str] = []
     for i, c in enumerate(chats, 1):
-        title = truncate(c.title, 40) if c.title else short_jid(c.jid)
-        extra: list[str] = []
+        line = f"{pal.dim(str(i).rjust(width))}  {pal.paint(chat_name(c), sender_color(c.jid))}"
         if c.unread_count:
-            extra.append(f"{c.unread_count} sin leer")
+            line += f" {pal.paint(f'({c.unread_count})', _BOLD)}"
         if c.muted_until:
-            extra.append("silenciado")
-        if c.kind == "group":
-            extra.append("grupo")
-        note = pal.dim(f"  ({', '.join(extra)})") if extra else ""
-        out.append(f"{pal.dim(str(i).rjust(width))}  {pal.paint(title, sender_color(c.jid))}{note}")
+            line += " 🔇"
+        out.append(line)
+    return out
+
+
+def render_search_results(
+    results: Sequence[MessageNew], name_of: NameOf, pal: Palette, tz: tzinfo | None = None
+) -> list[str]:
+    """Resultados numerados: `1  Familia · 20 oct 14:02 · Ana: texto…`."""
+    width = len(str(len(results)))
+    out: list[str] = []
+    for i, m in enumerate(results, 1):
+        d = _local(m.ts, tz)
+        when = f"{d.day} {_MONTHS[d.month - 1]} {format_time(m.ts, tz)}"
+        who = author_name(m, name_of)
+        text = truncate(_body(m) or "…", 50)
+        out.append(
+            f"{pal.dim(str(i).rjust(width))}  {pal.paint(truncate(name_of(m.chat_jid), 30), _BOLD)}"
+            f"{pal.dim(f' · {when} ·')} {who}: {text}"
+        )
     return out
 
 
@@ -278,12 +300,13 @@ HELP_NO_CHAT: Final = (
     "Texto sin `/` se envía al chat abierto. /help lista todos los comandos.",
 )
 
-HELP_TEXT: Final = (
-    "/chats [n]           lista los n chats más recientes (30 por defecto)",
-    "/open <n|nombre>     abre un chat (número de /chats o nombre aproximado)",
-    "/back                cierra el chat abierto",
-    "/history [n]         vuelve a mostrar los últimos n mensajes del chat abierto",
-    "/help                esta ayuda",
-    "/quit                salir (también Ctrl+D)",
-    "(texto sin /)        se envía al chat abierto",
-)
+
+def help_lines() -> list[str]:
+    """Ayuda completa generada desde la tabla de comandos."""
+    from wsp.cli.commands import COMMANDS
+
+    width = max(len(u) for _, u, _ in COMMANDS)
+    return [
+        *(f"{u.ljust(width)}  {d}" for _, u, d in COMMANDS),
+        f"{'(texto sin /)'.ljust(width)}  se envía al chat abierto (`//x` envía «/x»)",
+    ]

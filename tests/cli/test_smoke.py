@@ -12,7 +12,7 @@ def test_version() -> None:
 def test_main_without_command_opens_repl(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[bool] = []
 
-    async def fake_run(*, pal: Palette) -> int:
+    async def fake_run(*, pal: Palette, notifications: bool) -> int:
         seen.append(pal.enabled)
         return 0
 

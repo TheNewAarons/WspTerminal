@@ -94,6 +94,8 @@ class ChatRow:
     archived: bool
     muted_until: int
     pinned: bool
+    alias: str | None = None
+    push_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +147,8 @@ def _chat(row: sqlite3.Row) -> ChatRow:
         archived=bool(row["archived"]),
         muted_until=row["muted_until"],
         pinned=bool(row["pinned"]),
+        alias=row["alias"] if "alias" in row.keys() else None,
+        push_name=row["push_name"] if "push_name" in row.keys() else None,
     )
 
 
@@ -251,8 +255,10 @@ def upsert_contact(
 
 def list_chats(conn: sqlite3.Connection, limit: int = 50) -> list[ChatRow]:
     rows = conn.execute(
-        "SELECT jid, kind, title, unread_count, last_message_at, archived, muted_until, pinned "
-        "FROM chats WHERE archived = 0 ORDER BY last_message_at DESC LIMIT ?",
+        "SELECT c.jid, c.kind, c.title, c.unread_count, c.last_message_at, c.archived, "
+        "c.muted_until, c.pinned, k.alias, k.push_name "
+        "FROM chats c LEFT JOIN contacts k ON k.jid = c.jid "
+        "WHERE c.archived = 0 ORDER BY c.pinned DESC, c.last_message_at DESC LIMIT ?",
         (_limit(limit),),
     ).fetchall()
     return [_chat(r) for r in rows]

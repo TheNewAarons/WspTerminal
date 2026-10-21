@@ -139,12 +139,12 @@ def test_chat_list() -> None:
         ChatUpdated(jid=ANA, kind="direct"),
     ]
     assert r.render_chat_list(chats, PLAIN) == [
-        "1  Juan  (2 sin leer)",
-        "2  Familia  (silenciado, grupo)",
+        "1  Juan (2)",
+        "2  Familia 🔇",
         "3  222",
     ]
     assert r.render_chat_list(chats, COLOR)[0] == (
-        "\x1b[2m1\x1b[0m  \x1b[33mJuan\x1b[0m\x1b[2m  (2 sin leer)\x1b[0m"
+        "\x1b[2m1\x1b[0m  \x1b[33mJuan\x1b[0m \x1b[1m(2)\x1b[0m"
     )
 
 

@@ -3,12 +3,15 @@
 import argparse
 import asyncio
 import os
+import signal
 import sys
-from collections.abc import Sequence
+from collections.abc import Coroutine, Sequence
+from typing import Any
 
 from wsp import __version__
-from wsp.cli import daemon_cmd, render, repl
+from wsp.cli import config_cmd, daemon_cmd, render, repl, script
 from wsp.cli.pair import run_pair
+from wsp.daemon.config import ConfigError, load_config
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -28,6 +31,14 @@ def _parser() -> argparse.ArgumentParser:
     logs.add_argument("-n", type=int, default=20, metavar="N", help="líneas iniciales (20)")
     logs.add_argument("--no-follow", action="store_true", help="no seguir; imprimir y salir")
     logs.add_argument("--json", action="store_true", help="líneas JSON sin formatear")
+    send = sub.add_parser("send", help="enviar un mensaje y salir (0 = enviado)")
+    send.add_argument("chat", help="nombre aproximado o jid del chat")
+    send.add_argument("text", help="texto del mensaje; `-` lee de stdin")
+    send.add_argument("--wait-delivered", action="store_true", help="esperar a ✓✓ (30 s)")
+    tail = sub.add_parser("tail", help="imprimir mensajes en vivo (opcional: un chat)")
+    tail.add_argument("chat", nargs="?", help="limitar a este chat")
+    tail.add_argument("--json", action="store_true", help="un evento JSON por línea (para jq)")
+    sub.add_parser("config", help="mostrar la configuración efectiva y su ruta")
     return p
 
 
@@ -51,15 +62,39 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_pair(args.phone)
     if args.cmd == "daemon":
         return _daemon(args)
-    return _repl(args.no_color)
+    if args.cmd == "config":
+        return config_cmd.show()
+    pal = _palette(args.no_color)
+    if args.cmd == "send":
+        return _run(script.send(args.chat, _read(args.text), wait_delivered=args.wait_delivered))
+    if args.cmd == "tail":
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)  # `wsp tail | head` termina sin traceback
+        return _run(script.tail(args.chat, as_json=args.json, pal=pal))
+    return _repl(pal)
 
 
-def _repl(no_color: bool) -> int:
-    pal = render.Palette(render.color_enabled(no_color, dict(os.environ), sys.stdout.isatty()))
+def _palette(no_color: bool) -> render.Palette:
+    return render.Palette(render.color_enabled(no_color, dict(os.environ), sys.stdout.isatty()))
+
+
+def _read(text: str) -> str:
+    return script.read_text(text, sys.stdin)
+
+
+def _run(coro: Coroutine[Any, Any, int]) -> int:
     try:
-        return asyncio.run(repl.run(pal=pal))
+        return asyncio.run(coro)
     except KeyboardInterrupt:
-        return 0
+        return 130
+
+
+def _repl(pal: render.Palette) -> int:
+    try:
+        cfg = load_config()
+    except ConfigError as e:
+        sys.stderr.write(f"wsp: {e}\n")
+        return 1
+    return _run(repl.run(pal=pal, notifications=cfg.notifications))
 
 
 def app() -> None:

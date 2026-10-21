@@ -7,9 +7,11 @@ seed fija 42, tras `ANALYZE`. SQLite 3.50.4, macOS, conexión read-only. Mediana
 
 `list_chats`
 ```
-SCAN chats USING INDEX idx_chats_last_message
+SCAN c
+SEARCH k USING INDEX sqlite_autoindex_contacts_1 (jid=?) LEFT-JOIN
+USE TEMP B-TREE FOR ORDER BY
 ```
-(recorrido ordenado por índice sobre una tabla pequeña; sin TEMP B-TREE.)
+(ORDER BY pinned DESC, last_message_at DESC + LEFT JOIN contacts por PK; el TEMP B-TREE ordena solo la tabla pequeña `chats`.)
 
 `last_messages` (chat más activo)
 ```
