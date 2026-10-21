@@ -80,6 +80,9 @@ class SendResult:
     ts: int
 
 
+GroupMember = tuple[str, str | None, str | None]  # (jid, nombre en el grupo, jid de teléfono)
+
+
 class WaClient(Protocol):
     """Lo mínimo que el daemon necesita de WhatsApp."""
 
@@ -97,7 +100,7 @@ class WaClient(Protocol):
         quoted_sender: str | None = None,
         mentions: list[str] | None = None,
     ) -> SendResult: ...
-    async def group_members(self, chat_jid: str) -> list[tuple[str, str | None]]:
+    async def group_members(self, chat_jid: str) -> list[GroupMember]:
         """Participantes del grupo como (jid, nombre visible si lo hay)."""
 
     async def send_reaction(
@@ -357,15 +360,15 @@ class NeonizeClient:
             resp = await self._c.send_message(target, msg)
         return SendResult(wa_id=str(resp.ID), ts=norm_ts(resp.Timestamp))
 
-    async def group_members(self, chat_jid: str) -> list[tuple[str, str | None]]:
+    async def group_members(self, chat_jid: str) -> list[GroupMember]:
         from wsp.daemon.events import jid_str
 
         info = await self._c.get_group_info(self._jid(chat_jid))
-        out: list[tuple[str, str | None]] = []
+        out: list[GroupMember] = []
         for p in info.Participants:
             jid = jid_str(p.JID)
             if jid:
-                out.append((jid, str(p.DisplayName) or None))
+                out.append((jid, str(p.DisplayName) or None, jid_str(p.PhoneNumber)))
         return out
 
     async def send_reaction(

@@ -17,7 +17,7 @@ from typing import Any, Final
 from pydantic import ValidationError
 
 from wsp.daemon.config import OutboxConfig
-from wsp.daemon.session import WaClient
+from wsp.daemon.session import GroupMember, WaClient
 from wsp.protocol.models import (
     Event,
     HandledCommand,
@@ -338,12 +338,12 @@ class Commands:
         self,
         writer: Writer,
         outbox: Outbox,
-        members: Callable[[str], Awaitable[list[tuple[str, str | None]]]] | None = None,
+        members: Callable[[str], Awaitable[list[GroupMember]]] | None = None,
     ) -> None:
         self._writer = writer
         self._outbox = outbox
         self._members = members
-        self._members_cache: dict[str, tuple[float, list[tuple[str, str | None]]]] = {}
+        self._members_cache: dict[str, tuple[float, list[GroupMember]]] = {}
 
     async def __call__(self, request_id: str, cmd: HandledCommand) -> Mapping[str, Any]:
         try:
@@ -367,8 +367,15 @@ class Commands:
                 log.warning("members falló exc=%s", type(e).__name__)
                 raise CommandError("internal", "no se pudo leer el grupo") from None
             self._members_cache[chat_jid] = (time.monotonic(), found)
-        names = await self._writer.run(repo.names_for, [j for j, _ in found])
-        return {"members": [{"jid": j, "name": n or names.get(j)} for j, n in found]}
+        # En grupos @lid el contacto guardado está bajo el JID de teléfono, no bajo el lid.
+        wanted = list({j for m in found for j in (m[0], m[2]) if j})
+        names = await self._writer.run(repo.names_for, wanted)
+        return {
+            "members": [
+                {"jid": j, "name": n or names.get(j) or (names.get(pn) if pn else None)}
+                for j, n, pn in found
+            ]
+        }
 
     async def _dispatch(self, rid: str, cmd: HandledCommand) -> Mapping[str, Any]:
         payload: dict[str, Any]

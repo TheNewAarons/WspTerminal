@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from wsp.daemon.names import NameEntry
-from wsp.daemon.session import EventSink, QrHandler, SendResult
+from wsp.daemon.session import EventSink, GroupMember, QrHandler, SendResult
 
 ns = SimpleNamespace
 
@@ -80,7 +80,7 @@ class FakeClient:
         self.after_connect: Callable[[FakeClient], Awaitable[None]] | None = None
         self.send_errors: list[BaseException] = []
         self.names: list[NameEntry] = []
-        self.members: dict[str, list[tuple[str, str | None]]] = {}
+        self.members: dict[str, list[GroupMember]] = {}
         self.mentions_sent: list[list[str] | None] = []
         self.phone_code = "ABCD-1234"
         self.phones: list[str] = []
@@ -143,7 +143,7 @@ class FakeClient:
         self._n += 1
         return SendResult(wa_id=f"WA{self._n}", ts=1_700_000_000)
 
-    async def group_members(self, chat_jid: str) -> list[tuple[str, str | None]]:
+    async def group_members(self, chat_jid: str) -> list[GroupMember]:
         return list(self.members.get(chat_jid, []))
 
     async def fetch_names(self) -> list[NameEntry]:

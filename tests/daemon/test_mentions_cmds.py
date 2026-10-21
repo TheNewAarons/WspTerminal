@@ -74,14 +74,22 @@ async def test_reply_mention_missing_in_text_rejected(rig: MRig) -> None:
 
 
 async def test_members_returns_names_from_store(rig: MRig) -> None:
-    rig.client.members[GROUP_STR] = [(ANA, None), (LUIS, "Luis WA")]
+    rig.client.members[GROUP_STR] = [(ANA, None, None), (LUIS, "Luis WA", None)]
     repo.upsert_contact(rig.conn, ANA, push_name="Ana Push")
     res = await rig.commands("r1", Members(chat_jid=GROUP_STR))
     assert res == {"members": [{"jid": ANA, "name": "Ana Push"}, {"jid": LUIS, "name": "Luis WA"}]}
 
 
+async def test_members_lid_resolves_name_via_phone_jid(rig: MRig) -> None:
+    lid = "258677357432950@lid"
+    rig.client.members[GROUP_STR] = [(lid, None, ANA)]
+    repo.upsert_contact(rig.conn, ANA, push_name="Ana Guardada")
+    res = await rig.commands("r1", Members(chat_jid=GROUP_STR))
+    assert res == {"members": [{"jid": lid, "name": "Ana Guardada"}]}
+
+
 async def test_members_unknown_name_is_none(rig: MRig) -> None:
-    rig.client.members[GROUP_STR] = [(ANA, None)]
+    rig.client.members[GROUP_STR] = [(ANA, None, None)]
     res = await rig.commands("r1", Members(chat_jid=GROUP_STR))
     assert res == {"members": [{"jid": ANA, "name": None}]}
 
