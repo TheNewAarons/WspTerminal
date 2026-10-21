@@ -13,7 +13,14 @@ from pydantic import ValidationError
 from wsp import paths
 from wsp.cli import commands, render
 from wsp.cli.render import Palette
-from wsp.cli.repl import CONNECT_TIMEOUT, MAX_LIST, Repl
+from wsp.cli.repl import (
+    CONNECT_TIMEOUT,
+    MAX_LIST,
+    Repl,
+    parse_rows,
+    remote_error_text,
+    send_failure,
+)
 from wsp.protocol.client import Client, ConnectionLost, RemoteError, RequestTimeout
 from wsp.protocol.models import (
     ChatUpdated,
@@ -48,7 +55,7 @@ async def _connect(client: Client, err: TextIO) -> bool:
 
 async def _chats(client: Client) -> dict[str, ChatUpdated]:
     res = await client.request(ListChats(limit=MAX_LIST))
-    return {c.jid: c for c in (ChatUpdated.model_validate(x) for x in res.get("chats", []))}
+    return {c.jid: c for c in parse_rows(ChatUpdated, res, "chats")}
 
 
 def _pick(query: str, chats: dict[str, ChatUpdated], err: TextIO) -> str | None:
@@ -113,13 +120,13 @@ async def send(
                 return EXIT_NO_CHAT
             res = await client.request(SendText(chat_jid=jid, text=text))
         except RemoteError as e:
-            _fail(err, f"{render.truncate(e.code, 64)}: {render.truncate(e.message, 200)}")
+            _fail(err, remote_error_text(e))
             return EXIT_FAILED
         except (RequestTimeout, ConnectionLost, ValidationError):
             _fail(err, "sin respuesta válida del daemon")
             return EXIT_FAILED
-        if res.get("state") == "failed":
-            _fail(err, f"envío fallido: {render.one_line(str(res.get('error', '')))}")
+        if (failure := send_failure(res)) is not None:
+            _fail(err, failure)
             return EXIT_FAILED
         if wait_delivered:
             problem = await _wait_delivered(client, jid, timeout)
@@ -171,4 +178,6 @@ async def tail(
         except (RemoteError, RequestTimeout, ConnectionLost, ValidationError):
             _fail(err, "sin respuesta válida del daemon")
             return EXIT_FAILED
+        finally:
+            await repl.aclose()
     return EXIT_OK

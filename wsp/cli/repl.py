@@ -6,7 +6,7 @@ import os
 import sys
 import time
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import tzinfo
 from pathlib import Path
 from typing import Any, Final, TextIO
@@ -14,7 +14,7 @@ from typing import Any, Final, TextIO
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.patch_stdout import patch_stdout
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from wsp import paths
 from wsp.cli import commands, daemon_cmd, notify, render
@@ -55,6 +55,24 @@ _UNLINKED: Final = frozenset({"pairing", "logged_out"})
 
 Ask = Callable[[str], str]
 Notifier = Callable[[str, str], Awaitable[object]]
+_BAD_REPLY: Final = (ValidationError, TypeError, ValueError, AttributeError)
+
+
+def remote_error_text(e: RemoteError) -> str:
+    """`código: mensaje` acotado, para mostrar errores del daemon sin volcar contenido."""
+    return f"{render.truncate(e.code, 64)}: {render.truncate(e.message, 200)}"
+
+
+def send_failure(res: Mapping[str, Any] | None) -> str | None:
+    """Texto del fallo si la respuesta de un envío indica `failed`; si no, None."""
+    if res is not None and res.get("state") == "failed":
+        return f"envío fallido: {render.one_line(str(res.get('error', '')))}"
+    return None
+
+
+def parse_rows[M: BaseModel](model: type[M], res: Mapping[str, Any], key: str) -> list[M]:
+    """Valida `res[key]` como lista de `model`; ValidationError/TypeError si el daemon miente."""
+    return [model.model_validate(x) for x in res.get(key, [])]
 
 
 class Repl:
@@ -154,11 +172,16 @@ class Repl:
         if self._backfill is not None:
             self._backfill.append(m)
             return
+        if self._ingest(m):
+            self._maybe_notify(m)
+
+    def _ingest(self, m: MessageNew) -> bool:
+        """Recuerda `m` y lo imprime si es nuevo (una actualización no se reimprime)."""
         known = (m.chat_jid, m.wa_id) in self._printed
         self._remember(m)
-        if not known:  # una actualización de un mensaje ya impreso no se reimprime
+        if not known:
             self._print_message(m)
-            self._maybe_notify(m)
+        return not known
 
     def _maybe_notify(self, m: MessageNew) -> None:
         """Notifica mensajes ajenos de chats no abiertos ni silenciados."""
@@ -175,7 +198,19 @@ class Repl:
             body = f"{self.name_of(m.sender_jid or m.chat_jid)}: {body}"
         task = asyncio.ensure_future(self._notifier(who, body))
         self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        task.add_done_callback(self._task_done)
+
+    def _task_done(self, task: asyncio.Task[object]) -> None:
+        self._tasks.discard(task)
+        if not task.cancelled():
+            task.exception()  # una notificación fallida no debe dejar "exception never retrieved"
+
+    async def aclose(self) -> None:
+        """Cancela y espera las notificaciones pendientes (al salir del REPL)."""
+        pending = list(self._tasks)
+        for t in pending:
+            t.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
 
     def _print_message(self, m: MessageNew) -> None:
         key = (m.chat_jid, m.wa_id)
@@ -247,11 +282,7 @@ class Repl:
         batch, self._backfill = self._backfill or [], None
         self._emit(render.reconnect_header(end.count, self._pal))
         for m in batch:
-            key = (m.chat_jid, m.wa_id)
-            known = key in self._printed
-            self._remember(m)
-            if not known:
-                self._print_message(m)
+            self._ingest(m)
         if end.count:
             self._emit(render.separator("fin del relleno", self._pal))
 
@@ -276,8 +307,7 @@ class Repl:
             case commands.Open():
                 await self._cmd_open(cmd.query)
             case commands.Back():
-                self.open_jid = None
-                self.view = []
+                self._cmd_back()
             case commands.ShowHistory():
                 await self._cmd_history(cmd.n)
             case commands.Reply():
@@ -290,19 +320,23 @@ class Repl:
                 await self._cmd_mute(cmd)
         return True
 
+    def _cmd_back(self) -> None:
+        self.open_jid = None
+        self.view = []
+
     async def _call(self, cmd: Any) -> dict[str, Any] | None:
         """Request al daemon; imprime un error claro (sin traceback) y devuelve None."""
         try:
             return dict(await self._client.request(cmd))
         except RemoteError as e:
-            self.error(f"{render.truncate(e.code, 64)}: {render.truncate(e.message, 200)}")
+            self.error(remote_error_text(e))
         except (ConnectionLost, RequestTimeout) as e:
             self.error(f"sin respuesta del daemon ({type(e).__name__}); revisa `wsp daemon status`")
         return None
 
     def _report_send(self, res: dict[str, Any] | None) -> None:
-        if res is not None and res.get("state") == "failed":
-            self.error(f"envío fallido: {render.one_line(str(res.get('error', '')))}")
+        if (text := send_failure(res)) is not None:
+            self.error(text)
 
     async def _send(self, text: str) -> None:
         if self.open_jid is None:
@@ -339,8 +373,8 @@ class Repl:
         if res is None:
             return []
         try:
-            chats = [ChatUpdated.model_validate(c) for c in res.get("chats", [])]
-        except (ValidationError, TypeError, ValueError, AttributeError):
+            chats = parse_rows(ChatUpdated, res, "chats")
+        except _BAD_REPLY:
             self.error("respuesta inválida del daemon")
             return []
         for c in chats:
@@ -365,9 +399,14 @@ class Repl:
             await self._load_chats(MAX_LIST)
         if query.strip().isdigit() and not self.listing:
             await self._cmd_chats(commands.DEFAULT_CHATS)
-        match commands.resolve_chat(query, self.chats, self.listing):
-            case commands.Found(jid):
-                return jid
+        res = commands.resolve_chat(query, self.chats, self.listing)
+        if isinstance(res, commands.Found):
+            return res.jid
+        self._explain_unresolved(query, res)
+        return None
+
+    def _explain_unresolved(self, query: str, res: commands.Resolution) -> None:
+        match res:
             case commands.Ambiguous(jids):
                 self.listing = list(jids)
                 self.note(f"«{render.truncate(query, 30)}» es ambiguo; elige con /open <n>:")
@@ -376,7 +415,6 @@ class Repl:
                 self.error(f"no hay chat {n} en la lista" + (f" (1-{size})" if size else ""))
             case _:
                 self.error(f"no encuentro el chat «{render.truncate(query, 30)}» (/chats)")
-        return None
 
     async def _cmd_open(self, query: str) -> None:
         jid = await self._resolve(query)
@@ -397,8 +435,8 @@ class Repl:
         if res is None:
             return
         try:
-            rows = [MessageNew.model_validate(m) for m in res.get("messages", [])]
-        except (ValidationError, TypeError, ValueError, AttributeError):
+            rows = parse_rows(MessageNew, res, "messages")
+        except _BAD_REPLY:
             self.error("respuesta inválida del daemon")
             return
         self._last_day = None  # el historial abre con su fecha
@@ -414,8 +452,8 @@ class Repl:
         if res is None:
             return
         try:
-            hits = [MessageNew.model_validate(m) for m in res.get("messages", [])]
-        except (ValidationError, TypeError, ValueError, AttributeError):
+            hits = parse_rows(MessageNew, res, "messages")
+        except _BAD_REPLY:
             self.error("respuesta inválida del daemon")
             return
         if not hits:
@@ -541,3 +579,4 @@ async def run(
             pump.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await pump
+            await repl.aclose()

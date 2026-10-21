@@ -4,11 +4,15 @@ Usa `wspd.serve` real (DB, Bridge, Server, socket) con un WaClient falso; el cli
 corre en otro hilo con su propio loop, así un loop del daemon bloqueado se ve como latencia.
 t0 = instante en que el evento entra al daemon (`on_event`); t1 = llegada al cliente.
 
-    uv run python tools/latency.py [--events 1000] [--rate 200] [--json] [--label antes]
+    uv run python tools/latency.py [--events 1000] [--rate 200] [--json] [--label antes] [--render]
+
+`--render`: t1 se toma después de alimentar cada MessageNew a `Repl.handle` (salida a StringIO),
+es decir evento→pantalla; sin el flag, t1 es la llegada al cliente del socket.
 """
 
 import argparse
 import asyncio
+import io
 import json
 import logging
 import os
@@ -61,9 +65,15 @@ def _event(i: int) -> SimpleNamespace:
 
 
 def _client_thread(
-    n: int, arrivals: dict[str, int], ready: threading.Event, done: threading.Event
+    n: int,
+    arrivals: dict[str, int],
+    ready: threading.Event,
+    done: threading.Event,
+    render: bool = False,
 ) -> None:
     from wsp import paths
+    from wsp.cli.render import Palette
+    from wsp.cli.repl import Repl
     from wsp.protocol.client import Client
     from wsp.protocol.models import MessageNew
 
@@ -72,10 +82,13 @@ def _client_thread(
         await client.start()
         try:
             await client.wait_connected(timeout=10)
+            repl = Repl(client, io.StringIO(), Palette(False)) if render else None
             ready.set()
             async with asyncio.timeout(EVENT_TIMEOUT + n / 50):
                 async for ev in client.events():
                     if isinstance(ev, MessageNew):
+                        if repl is not None:
+                            repl.handle(ev)
                         arrivals[ev.wa_id] = time.perf_counter_ns()
                         if len(arrivals) >= n:
                             return
@@ -92,7 +105,7 @@ def _client_thread(
         done.set()
 
 
-async def measure(n: int, rate: float) -> list[float]:
+async def measure(n: int, rate: float, render: bool = False) -> list[float]:
     """Latencias en ms, una por evento entregado."""
     from wsp.daemon.config import Config
     from wsp.daemon.main import serve
@@ -107,7 +120,10 @@ async def measure(n: int, rate: float) -> list[float]:
     arrivals: dict[str, int] = {}
     ready, done = threading.Event(), threading.Event()
     thread = threading.Thread(
-        target=_client_thread, args=(n, arrivals, ready, done), daemon=True, name="latency-client"
+        target=_client_thread,
+        args=(n, arrivals, ready, done, render),
+        daemon=True,
+        name="latency-client",
     )
     thread.start()
     await asyncio.to_thread(ready.wait, 15)
@@ -154,6 +170,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else "")
     ap.add_argument("--events", type=int, default=1000)
     ap.add_argument("--rate", type=float, default=200.0, help="eventos/s; 0 = ráfaga sin pausa")
+    ap.add_argument("--render", action="store_true", help="incluye el renderizado del REPL en t1")
     ap.add_argument("--label", default="")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
@@ -165,7 +182,7 @@ def main() -> int:
         from wsp import paths
 
         paths.ensure_dirs()
-        lat = asyncio.run(measure(args.events, args.rate))
+        lat = asyncio.run(measure(args.events, args.rate, args.render))
     finally:
         shutil.rmtree(home, ignore_errors=True)
     if not lat:
@@ -173,9 +190,10 @@ def main() -> int:
         return 1
     result = summarize(lat, args.events)
     if args.json:
-        print(json.dumps({"label": args.label, "rate": args.rate, **result}))
+        print(json.dumps({"label": args.label, "rate": args.rate, "render": args.render, **result}))
     else:
         tag = f"[{args.label}] " if args.label else ""
+        tag += "render " if args.render else ""
         print(
             f"{tag}n={args.events} rate={args.rate:g}/s entregados={result['delivered']:.0f} "
             f"perdidos={result['lost']:.0f} p50={result['p50_ms']}ms p95={result['p95_ms']}ms "
