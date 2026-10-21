@@ -131,7 +131,7 @@ class Repl:
             case BackfillEnd():
                 self._on_backfill_end(ev)
             case ErrorEvent():
-                self.error(f"{render.one_line(ev.code)}: {render.one_line(ev.message)}")
+                self.error(f"{render.truncate(ev.code, 64)}: {render.truncate(ev.message, 200)}")
             case _:
                 pass  # presencia: sin salida
 
@@ -249,7 +249,7 @@ class Repl:
         try:
             return dict(await self._client.request(cmd))
         except RemoteError as e:
-            self.error(f"{render.one_line(e.code)}: {render.one_line(e.message)}")
+            self.error(f"{render.truncate(e.code, 64)}: {render.truncate(e.message, 200)}")
         except (ConnectionLost, RequestTimeout) as e:
             self.error(f"sin respuesta del daemon ({type(e).__name__}); revisa `wsp daemon status`")
         return None
@@ -268,7 +268,7 @@ class Repl:
             return []
         try:
             chats = [ChatUpdated.model_validate(c) for c in res.get("chats", [])]
-        except ValidationError:
+        except (ValidationError, TypeError, ValueError, AttributeError):
             self.error("respuesta inválida del daemon")
             return []
         for c in chats:
@@ -329,7 +329,7 @@ class Repl:
             return
         try:
             rows = [MessageNew.model_validate(m) for m in res.get("messages", [])]
-        except ValidationError:
+        except (ValidationError, TypeError, ValueError, AttributeError):
             self.error("respuesta inválida del daemon")
             return
         self._last_day = None  # el historial abre con su fecha
@@ -348,16 +348,33 @@ def _parse_count(arg: str, default: int) -> int | None:
 
 async def _pump(client: Client, repl: Repl) -> None:
     async for ev in client.events():
-        repl.handle(ev)
+        try:
+            repl.handle(ev)
+        except Exception as e:  # un evento malo no debe dejar el REPL sordo
+            repl.error(f"error interno al procesar un evento ({type(e).__name__})")
+
+
+class _CommandHistory(FileHistory):
+    """Persiste solo comandos (`/…`): el texto de los mensajes (PII) no se guarda en disco."""
+
+    def store_string(self, string: str) -> None:
+        if string.startswith("/"):
+            super().store_string(string)
 
 
 def _history_file() -> FileHistory:
-    """Historial de entrada en `~/.local/state/wsp/history` con permisos 600."""
+    """Historial de comandos en `~/.local/state/wsp/history` con permisos 600."""
+    paths.ensure_dirs()
     path = paths.state_dir() / "history"
-    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
-    os.close(fd)
-    path.chmod(0o600)
-    return FileHistory(str(path))
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        st = os.fstat(fd)
+        if st.st_uid != os.getuid():
+            raise PermissionError("historial pertenece a otro usuario")
+        os.fchmod(fd, 0o600)
+    finally:
+        os.close(fd)
+    return _CommandHistory(str(path))
 
 
 async def run_loop(repl: Repl, session: PromptSession[str]) -> int:
@@ -369,8 +386,11 @@ async def run_loop(repl: Repl, session: PromptSession[str]) -> int:
             continue
         except EOFError:
             return EXIT_OK
-        if not await repl.handle_line(line):
-            return EXIT_OK
+        try:
+            if not await repl.handle_line(line):
+                return EXIT_OK
+        except Exception as e:  # sin traceback: el mensaje podría llevar contenido
+            repl.error(f"error interno ({type(e).__name__})")
 
 
 def offer_daemon_help(ask: Ask, out: TextIO) -> None:
@@ -419,5 +439,5 @@ async def run(
                 return await run_loop(repl, session)
         finally:
             pump.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await pump

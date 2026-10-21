@@ -350,3 +350,27 @@ def test_history_file_is_private(wsp_home: Path) -> None:
     repl._history_file()
     path = wsp_home / "state" / "history"
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_history_persists_only_commands(wsp_home: Path) -> None:
+    h = repl._history_file()
+    h.store_string("mensaje privado")
+    h.store_string("/chats")
+    text = (wsp_home / "state" / "history").read_text()
+    assert "/chats" in text and "privado" not in text
+
+
+async def test_extreme_ts_does_not_kill_pump() -> None:
+    out = io.StringIO()
+    r = Repl(None, out, Palette(False), tz=UTC)  # type: ignore[arg-type]
+    r.handle(msg("a", ts=2**63 - 1, body="x"))
+    assert "› x" in out.getvalue()
+
+
+async def test_malformed_reply_is_reported(
+    client: Client, out: io.StringIO, daemon: FakeDaemon
+) -> None:
+    daemon.chats = 5  # type: ignore[assignment]
+    r = Repl(client, out, Palette(False))
+    await r.handle_line("/chats")
+    assert "Traceback" not in out.getvalue()

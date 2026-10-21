@@ -4,6 +4,7 @@ Todo texto que viene de la red (cuerpos, títulos, nombres) pasa por `sanitize` 
 imprimirse, para que un mensaje no pueda inyectar secuencias de escape en la terminal.
 """
 
+import unicodedata
 import zlib
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -80,17 +81,17 @@ def color_enabled(no_color_flag: bool, environ: dict[str, str] | None, is_tty: b
 
 
 def sanitize(text: str) -> str:
-    """Quita controles C0/C1 (salvo `\\n`), ESC, DEL y controles bidi; el tab pasa a 4 espacios."""
+    """Quita controles y caracteres invisibles de formato (Cc/Cf/Zl/Zp), salvo `\\n`.
+
+    Cubre ESC, C0/C1, DEL, bidi, ancho cero y separadores de línea; el tab pasa a 4 espacios.
+    """
     out: list[str] = []
     for ch in text.replace("\r\n", "\n").replace("\r", "\n"):
-        o = ord(ch)
         if ch == "\n":
             out.append(ch)
         elif ch == "\t":
             out.append("    ")
-        elif o < 0x20 or 0x7F <= o <= 0x9F or 0x202A <= o <= 0x202E or 0x2066 <= o <= 0x2069:
-            continue
-        else:
+        elif unicodedata.category(ch) not in ("Cc", "Cf", "Zl", "Zp"):
             out.append(ch)
     return "".join(out)
 
@@ -116,8 +117,11 @@ def sender_color(jid: str) -> int:
     return PALETTE[zlib.crc32(jid.encode()) % len(PALETTE)]
 
 
+_TS_MAX: Final = 253_402_000_000  # año 9999: acota `ts` remotos para no desbordar datetime
+
+
 def _local(ts: int, tz: tzinfo | None) -> datetime:
-    return datetime.fromtimestamp(ts, UTC).astimezone(tz)
+    return datetime.fromtimestamp(max(0, min(ts, _TS_MAX)), UTC).astimezone(tz)
 
 
 def format_time(ts: int, tz: tzinfo | None = None) -> str:
