@@ -112,3 +112,21 @@ async def test_members_provider_failure_is_internal(
         await cmds("r1", Members(chat_jid=GROUP_STR))
     assert ei.value.code == "internal"
     assert "secreto" not in ei.value.message
+
+
+def test_check_mentions_requires_word_boundary() -> None:
+    from wsp.daemon.outbox import _check_mentions
+
+    _check_mentions("hola @5215511110001 ok", ["5215511110001@s.whatsapp.net"])
+    with pytest.raises(CommandError):
+        _check_mentions("hola @52155111100019", ["5215511110001@s.whatsapp.net"])
+
+
+@pytest.mark.parametrize("bad", ["x y@s.whatsapp.net", "123@g.us", "a@b@s.whatsapp.net", "@lid"])
+def test_send_text_rejects_malformed_mention_jid(bad: str) -> None:
+    from pydantic import ValidationError
+
+    from wsp.protocol.models import SendText
+
+    with pytest.raises(ValidationError):
+        SendText(chat_jid="1@g.us", text="@x", mentions=[bad])

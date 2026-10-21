@@ -8,6 +8,7 @@ Los errores se publican como códigos estables, nunca como texto libre.
 
 import asyncio
 import logging
+import re
 import sqlite3
 import time
 from collections.abc import Awaitable, Callable, Mapping
@@ -39,6 +40,7 @@ from wsp.store.writer import Writer
 
 log = logging.getLogger(__name__)
 
+MEMBERS_TTL: Final = 30.0  # s; caché de miembros para no golpear la red en cada /members
 PLACEHOLDER_PREFIX: Final = "wsp:"
 ERR_SEND_FAILED: Final = "send_failed"
 ERR_TIMEOUT: Final = "send_timeout"
@@ -341,6 +343,7 @@ class Commands:
         self._writer = writer
         self._outbox = outbox
         self._members = members
+        self._members_cache: dict[str, tuple[float, list[tuple[str, str | None]]]] = {}
 
     async def __call__(self, request_id: str, cmd: HandledCommand) -> Mapping[str, Any]:
         try:
@@ -354,11 +357,16 @@ class Commands:
     async def _members_of(self, chat_jid: str) -> Mapping[str, Any]:
         if self._members is None or not chat_jid.endswith("@g.us"):
             raise CommandError("not_found", "no es un grupo")
-        try:
-            found = await self._members(chat_jid)
-        except Exception as e:  # sin contenido: solo el tipo
-            log.warning("members falló exc=%s", type(e).__name__)
-            raise CommandError("internal", "no se pudo leer el grupo") from None
+        hit = self._members_cache.get(chat_jid)
+        if hit is not None and time.monotonic() - hit[0] < MEMBERS_TTL:
+            found = hit[1]
+        else:
+            try:
+                found = await self._members(chat_jid)
+            except Exception as e:  # sin contenido: solo el tipo
+                log.warning("members falló exc=%s", type(e).__name__)
+                raise CommandError("internal", "no se pudo leer el grupo") from None
+            self._members_cache[chat_jid] = (time.monotonic(), found)
         names = await self._writer.run(repo.names_for, [j for j, _ in found])
         return {"members": [{"jid": j, "name": n or names.get(j)} for j, n in found]}
 
@@ -404,7 +412,7 @@ def _check_mentions(text: str, mentions: list[str]) -> None:
     """Cada mención debe aparecer en el texto como `@<user>` (si no, el destinatario no la ve)."""
     for jid in mentions:
         user = jid.split("@", 1)[0]
-        if not user or f"@{user}" not in text:
+        if not user or not re.search(rf"(?<![\w@])@{re.escape(user)}(?!\w)", text):
             raise CommandError("bad_payload", "mención sin su @ en el texto")
 
 

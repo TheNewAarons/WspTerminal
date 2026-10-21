@@ -6,6 +6,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Final
 
+from wsp.cli import render
+
 _TOKEN: Final = re.compile(r"(?<![\w@])@(\w[\w.-]{0,63})")
 GROUP_SUFFIX: Final = "@g.us"
 TOP_CANDIDATES: Final = 5
@@ -58,7 +60,7 @@ def resolve_mentions(text: str, members: list[Member]) -> Prepared:
         if not found:
             return m.group(0)
         if len({j for j, _ in found}) > 1:
-            names = ", ".join(n or _user(j) for j, n in found[:TOP_CANDIDATES])
+            names = ", ".join(render.one_line(n or _user(j)) for j, n in found[:TOP_CANDIDATES])
             raise MentionError(f"@{token} es ambiguo ({names}); escribe más letras o el número")
         jid = found[0][0]
         if jid not in mentions:

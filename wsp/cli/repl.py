@@ -117,7 +117,7 @@ class Repl:
         self._emit(self._pal.dim(f"  {text}"))
 
     def error(self, text: str) -> None:
-        self._emit(self._pal.paint(f"  ✗ {text}", 31))
+        self._emit(self._pal.paint(f"  ✗ {render.one_line(text)}", 31))
 
     # ---- nombres ------------------------------------------------------------------------
 

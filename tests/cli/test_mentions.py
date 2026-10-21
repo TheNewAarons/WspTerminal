@@ -2,6 +2,7 @@
 
 import pytest
 
+from wsp.cli import mentions
 from wsp.cli.mentions import (
     MentionError,
     Prepared,
@@ -106,3 +107,11 @@ async def test_prepare_fetch_none_raises() -> None:
 
     with pytest.raises(MentionError, match="miembros"):
         await prepare("hola @ana", GROUP, fetch)
+
+
+def test_ambiguity_error_strips_escape_sequences() -> None:
+    members = [("111@s.whatsapp.net", "Ana\x1b[2J"), ("222@s.whatsapp.net", "Ana\x07 B")]
+    with pytest.raises(mentions.MentionError) as e:
+        mentions.resolve_mentions("hola @ana", members)
+    assert "\x1b" not in str(e.value)
+    assert "\x07" not in str(e.value)

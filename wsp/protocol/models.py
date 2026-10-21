@@ -25,7 +25,10 @@ Text = Annotated[str, StringConstraints(min_length=1, max_length=MAX_TEXT)]
 Ts = Annotated[int, Field(ge=0, le=2**63 - 1)]
 Limit = Annotated[int, Field(ge=1, le=MAX_LIMIT)]
 MAX_MENTIONS: Final = 50
-Mentions = Annotated[list[Jid], Field(max_length=MAX_MENTIONS)]
+MentionJid = Annotated[
+    str, StringConstraints(max_length=128, pattern=r"^[0-9A-Za-z._-]{1,64}@(s\.whatsapp\.net|lid)$")
+]
+Mentions = Annotated[list[MentionJid], Field(max_length=MAX_MENTIONS)]
 
 Status = Literal["pending", "sent", "delivered", "read", "failed"]
 ChatKind = Literal["direct", "group", "broadcast"]
