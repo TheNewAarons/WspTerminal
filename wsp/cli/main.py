@@ -1,17 +1,20 @@
 """Entrypoint de `wsp`."""
 
 import argparse
+import asyncio
+import os
 import sys
 from collections.abc import Sequence
 
 from wsp import __version__
-from wsp.cli import daemon_cmd
+from wsp.cli import daemon_cmd, render, repl
 from wsp.cli.pair import run_pair
 
 
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="wsp", description="Cliente de WhatsApp para la terminal.")
     p.add_argument("--version", action="version", version=f"wsp {__version__}")
+    p.add_argument("--no-color", action="store_true", help="sin colores ANSI (también NO_COLOR)")
     sub = p.add_subparsers(dest="cmd")
     pair = sub.add_parser("pair", help="vincular el dispositivo (QR o código)")
     pair.add_argument("--phone", metavar="NÚMERO", help="vincular con código en vez de QR")
@@ -48,8 +51,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_pair(args.phone)
     if args.cmd == "daemon":
         return _daemon(args)
-    sys.stdout.write(f"wsp {__version__}\n")
-    return 0
+    return _repl(args.no_color)
+
+
+def _repl(no_color: bool) -> int:
+    pal = render.Palette(render.color_enabled(no_color, dict(os.environ), sys.stdout.isatty()))
+    try:
+        return asyncio.run(repl.run(pal=pal))
+    except KeyboardInterrupt:
+        return 0
 
 
 def app() -> None:
