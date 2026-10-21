@@ -117,7 +117,9 @@ async def serve(
 
         session = Session(client, cfg.reconnect, emit, sink, on_connected=names.request)
         outbox = Outbox(writer, client, cfg.outbox, emit)
-        server = Server(paths.socket_path(), Commands(writer, outbox), sqlite_backfill())
+        server = Server(
+            paths.socket_path(), Commands(writer, outbox, client.group_members), sqlite_backfill()
+        )
         await server.start()
         outbox.start()
         maint_task = asyncio.create_task(

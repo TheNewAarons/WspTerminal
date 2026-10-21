@@ -17,7 +17,7 @@ from prompt_toolkit.patch_stdout import patch_stdout
 from pydantic import BaseModel, ValidationError
 
 from wsp import paths
-from wsp.cli import commands, daemon_cmd, notify, render
+from wsp.cli import commands, daemon_cmd, mentions, notify, render
 from wsp.cli.completer import WspCompleter
 from wsp.cli.render import Palette
 from wsp.protocol.client import Client, ConnectionLost, RemoteError, RequestTimeout
@@ -31,6 +31,7 @@ from wsp.protocol.models import (
     History,
     ListChats,
     MarkRead,
+    Members,
     MessageDeleted,
     MessageEdited,
     MessageNew,
@@ -342,7 +343,27 @@ class Repl:
         if self.open_jid is None:
             self._emit(*render.HELP_NO_CHAT)
             return
-        self._report_send(await self._call(SendText(chat_jid=self.open_jid, text=text)))
+        prepared = await self._prepare(text, self.open_jid)
+        if prepared is not None:
+            self._report_send(
+                await self._call(
+                    SendText(chat_jid=self.open_jid, text=prepared.text, mentions=prepared.mentions)
+                )
+            )
+
+    async def _members(self, chat_jid: str) -> list[mentions.Member] | None:
+        res = await self._call(Members(chat_jid=chat_jid))
+        if res is None:
+            return None
+        return [(str(m["jid"]), m.get("name")) for m in res.get("members", [])]
+
+    async def _prepare(self, text: str, chat_jid: str) -> mentions.Prepared | None:
+        """Resuelve menciones; imprime el error y devuelve None si no se puede enviar."""
+        try:
+            return await mentions.prepare(text, chat_jid, self._members)
+        except mentions.MentionError as e:
+            self.error(str(e))
+            return None
 
     def _target(self, n: int) -> MessageNew | None:
         """Mensaje número `n` de la vista actual; avisa si no hay chat o n está fuera de rango."""
@@ -356,10 +377,18 @@ class Repl:
 
     async def _cmd_reply(self, cmd: commands.Reply) -> None:
         target = self._target(cmd.n)
-        if target is not None:
+        if target is None:
+            return
+        prepared = await self._prepare(cmd.text, target.chat_jid)
+        if prepared is not None:
             self._report_send(
                 await self._call(
-                    SendReply(chat_jid=target.chat_jid, quoted_wa_id=target.wa_id, text=cmd.text)
+                    SendReply(
+                        chat_jid=target.chat_jid,
+                        quoted_wa_id=target.wa_id,
+                        text=prepared.text,
+                        mentions=prepared.mentions,
+                    )
                 )
             )
 

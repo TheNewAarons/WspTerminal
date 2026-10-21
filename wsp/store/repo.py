@@ -234,6 +234,19 @@ def set_chat_title(conn: sqlite3.Connection, jid: str, title: str) -> bool:
     return cur.rowcount > 0
 
 
+def names_for(conn: sqlite3.Connection, jids: list[str]) -> dict[str, str]:
+    """Nombre conocido (alias > push_name) por JID; los desconocidos no aparecen."""
+    if not jids:
+        return {}
+    marks = ",".join("?" * len(jids))
+    rows = conn.execute(
+        "SELECT jid, COALESCE(alias, push_name) AS n FROM contacts "  # noqa: S608
+        f"WHERE jid IN ({marks}) AND COALESCE(alias, push_name) IS NOT NULL",
+        jids,
+    ).fetchall()
+    return {r["jid"]: r["n"] for r in rows}
+
+
 def upsert_contact(
     conn: sqlite3.Connection,
     jid: str,

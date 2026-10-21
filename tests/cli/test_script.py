@@ -15,6 +15,7 @@ from wsp.protocol.models import (
     ChatUpdated,
     HandledCommand,
     ListChats,
+    Members,
     MessageNew,
     MessageStatus,
     SendText,
@@ -46,12 +47,18 @@ class FakeDaemon:
         self.send_err_text: str | None = None
         self.follow_up: MessageStatus | None = None  # evento emitido tras el envío
         self.server: Server | None = None
+        self.members: list[dict[str, Any]] = []
+        self.members_error: CommandError | None = None
 
     async def __call__(self, rid: str, cmd: HandledCommand) -> Mapping[str, Any]:
         self.cmds.append(cmd)
         match cmd:
             case ListChats():
                 return {"chats": [c.model_dump(mode="json") for c in self.chats]}
+            case Members():
+                if self.members_error is not None:
+                    raise self.members_error
+                return {"members": self.members}
             case SendText():
                 if self.send_error is not None:
                     raise self.send_error
@@ -282,3 +289,51 @@ async def test_tail_daemon_down(short_path: Path, monkeypatch: pytest.MonkeyPatc
         socket=short_path / "no.sock",
     )
     assert code == script.EXIT_UNREACHABLE
+
+
+# ---- menciones -------------------------------------------------------------------------------
+
+GRUPO = "999@g.us"
+PEPE = "5215500000009@s.whatsapp.net"
+
+
+async def test_send_resolves_mentions_in_group(
+    server: Server, sock: Path, daemon: FakeDaemon
+) -> None:
+    daemon.chats = [ChatUpdated(jid=GRUPO, kind="group", title="Familia")]
+    daemon.members = [{"jid": PEPE, "name": "Pepe Toño"}]
+    err = io.StringIO()
+    assert await script.send("familia", "hola @pepe", socket=sock, err=err) == script.EXIT_OK
+    [c] = daemon.sent()
+    assert c.text == "hola @5215500000009" and c.mentions == [PEPE]
+
+
+async def test_send_ambiguous_mention_fails_without_sending(
+    server: Server, sock: Path, daemon: FakeDaemon
+) -> None:
+    daemon.chats = [ChatUpdated(jid=GRUPO, kind="group", title="Familia")]
+    daemon.members = [{"jid": PEPE, "name": "Pepe A"}, {"jid": JUAN, "name": "Pepe B"}]
+    err = io.StringIO()
+    assert await script.send("familia", "@pepe", socket=sock, err=err) == script.EXIT_FAILED
+    assert "ambiguo" in err.getvalue()
+    assert daemon.sent() == []
+
+
+async def test_send_members_failure_fails_without_sending(
+    server: Server, sock: Path, daemon: FakeDaemon
+) -> None:
+    daemon.chats = [ChatUpdated(jid=GRUPO, kind="group", title="Familia")]
+    daemon.members_error = CommandError("internal", "x")
+    err = io.StringIO()
+    assert await script.send("familia", "@pepe", socket=sock, err=err) == script.EXIT_FAILED
+    assert "miembros" in err.getvalue()
+    assert daemon.sent() == []
+
+
+async def test_send_direct_chat_does_not_query_members(
+    server: Server, sock: Path, daemon: FakeDaemon
+) -> None:
+    err = io.StringIO()
+    assert await script.send("juan", "hola @x", socket=sock, err=err) == script.EXIT_OK
+    assert not any(isinstance(c, Members) for c in daemon.cmds)
+    assert daemon.sent()[0].mentions == []

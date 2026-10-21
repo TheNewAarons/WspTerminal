@@ -90,8 +90,16 @@ class WaClient(Protocol):
 
     async def disconnect(self) -> None: ...
     async def send_text(
-        self, jid: str, text: str, quoted_wa_id: str | None = None, quoted_sender: str | None = None
+        self,
+        jid: str,
+        text: str,
+        quoted_wa_id: str | None = None,
+        quoted_sender: str | None = None,
+        mentions: list[str] | None = None,
     ) -> SendResult: ...
+    async def group_members(self, chat_jid: str) -> list[tuple[str, str | None]]:
+        """Participantes del grupo como (jid, nombre visible si lo hay)."""
+
     async def send_reaction(
         self, chat_jid: str, wa_id: str, author_jid: str | None, emoji: str
     ) -> SendResult: ...
@@ -324,10 +332,15 @@ class NeonizeClient:
         return build_jid(user, server)
 
     async def send_text(
-        self, jid: str, text: str, quoted_wa_id: str | None = None, quoted_sender: str | None = None
+        self,
+        jid: str,
+        text: str,
+        quoted_wa_id: str | None = None,
+        quoted_sender: str | None = None,
+        mentions: list[str] | None = None,
     ) -> SendResult:
         target = self._jid(jid)
-        if quoted_wa_id is None:
+        if quoted_wa_id is None and not mentions:
             resp = await self._c.send_message(target, text)
         else:
             from neonize.proto.waE2E.WAWebProtobufsE2E_pb2 import (
@@ -336,10 +349,24 @@ class NeonizeClient:
                 Message,
             )
 
-            ctx = ContextInfo(stanzaID=quoted_wa_id, participant=quoted_sender or "")
+            ctx = ContextInfo(mentionedJID=mentions or [])
+            if quoted_wa_id is not None:
+                ctx.stanzaID = quoted_wa_id
+                ctx.participant = quoted_sender or ""
             msg = Message(extendedTextMessage=ExtendedTextMessage(text=text, contextInfo=ctx))
             resp = await self._c.send_message(target, msg)
         return SendResult(wa_id=str(resp.ID), ts=norm_ts(resp.Timestamp))
+
+    async def group_members(self, chat_jid: str) -> list[tuple[str, str | None]]:
+        from wsp.daemon.events import jid_str
+
+        info = await self._c.get_group_info(self._jid(chat_jid))
+        out: list[tuple[str, str | None]] = []
+        for p in info.Participants:
+            jid = jid_str(p.JID)
+            if jid:
+                out.append((jid, str(p.DisplayName) or None))
+        return out
 
     async def send_reaction(
         self, chat_jid: str, wa_id: str, author_jid: str | None, emoji: str

@@ -620,3 +620,18 @@ def test_list_chats_joins_contact(conn: sqlite3.Connection) -> None:
     a, b = repo.list_chats(conn)
     assert (a.alias, a.push_name) == ("Anita", "Ana")
     assert (b.alias, b.push_name) == (None, None)
+
+
+# ---- names_for ------------------------------------------------------------------------------
+
+
+def test_names_for_alias_over_push_name(conn: sqlite3.Connection) -> None:
+    repo.upsert_contact(conn, "1@s.whatsapp.net", push_name="Push", alias="Alias")
+    repo.upsert_contact(conn, "2@s.whatsapp.net", push_name="Solo push")
+    repo.upsert_contact(conn, "3@s.whatsapp.net")
+    got = repo.names_for(conn, ["1@s.whatsapp.net", "2@s.whatsapp.net", "3@s.whatsapp.net", "x@y"])
+    assert got == {"1@s.whatsapp.net": "Alias", "2@s.whatsapp.net": "Solo push"}
+
+
+def test_names_for_empty(conn: sqlite3.Connection) -> None:
+    assert repo.names_for(conn, []) == {}

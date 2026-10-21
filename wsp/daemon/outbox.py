@@ -23,6 +23,7 @@ from wsp.protocol.models import (
     History,
     ListChats,
     MarkRead,
+    Members,
     MessageNew,
     MessageStatus,
     Mute,
@@ -257,7 +258,11 @@ class Outbox:
         match p.get("kind"):
             case "text" | "reply":
                 return await self._client.send_text(
-                    item.chat_jid, p["text"], p.get("quoted_wa_id"), p.get("quoted_sender")
+                    item.chat_jid,
+                    p["text"],
+                    p.get("quoted_wa_id"),
+                    p.get("quoted_sender"),
+                    p.get("mentions") or None,
                 )
             case "react":
                 return await self._client.send_reaction(
@@ -327,9 +332,15 @@ class Outbox:
 class Commands:
     """`Handler` del `Server`: despacha comandos al outbox o al store (SQLite en el hilo writer)."""
 
-    def __init__(self, writer: Writer, outbox: Outbox) -> None:
+    def __init__(
+        self,
+        writer: Writer,
+        outbox: Outbox,
+        members: Callable[[str], Awaitable[list[tuple[str, str | None]]]] | None = None,
+    ) -> None:
         self._writer = writer
         self._outbox = outbox
+        self._members = members
 
     async def __call__(self, request_id: str, cmd: HandledCommand) -> Mapping[str, Any]:
         try:
@@ -340,13 +351,30 @@ class Commands:
             log.error("comando falló exc=%s", type(e).__name__)
             raise CommandError("internal", "error de almacenamiento") from None
 
+    async def _members_of(self, chat_jid: str) -> Mapping[str, Any]:
+        if self._members is None or not chat_jid.endswith("@g.us"):
+            raise CommandError("not_found", "no es un grupo")
+        try:
+            found = await self._members(chat_jid)
+        except Exception as e:  # sin contenido: solo el tipo
+            log.warning("members falló exc=%s", type(e).__name__)
+            raise CommandError("internal", "no se pudo leer el grupo") from None
+        names = await self._writer.run(repo.names_for, [j for j, _ in found])
+        return {"members": [{"jid": j, "name": n or names.get(j)} for j, n in found]}
+
     async def _dispatch(self, rid: str, cmd: HandledCommand) -> Mapping[str, Any]:
+        payload: dict[str, Any]
         match cmd:
             case SendText():
-                return await self._outbox.enqueue(
-                    rid, {"kind": "text", "text": cmd.text}, cmd.chat_jid
-                )
+                _check_mentions(cmd.text, cmd.mentions)
+                payload = {"kind": "text", "text": cmd.text}
+                if cmd.mentions:
+                    payload["mentions"] = cmd.mentions
+                return await self._outbox.enqueue(rid, payload, cmd.chat_jid)
+            case Members():
+                return await self._members_of(cmd.chat_jid)
             case SendReply():
+                _check_mentions(cmd.text, cmd.mentions)
                 author = await self._writer.run(repo.message_sender, cmd.chat_jid, cmd.quoted_wa_id)
                 payload = {
                     "kind": "reply",
@@ -354,6 +382,8 @@ class Commands:
                     "quoted_wa_id": cmd.quoted_wa_id,
                     "quoted_sender": None if author is None else author[0],
                 }
+                if cmd.mentions:
+                    payload["mentions"] = cmd.mentions
                 return await self._outbox.enqueue(rid, payload, cmd.chat_jid)
             case React():
                 author = await self._writer.run(repo.message_sender, cmd.chat_jid, cmd.wa_id)
@@ -368,6 +398,14 @@ class Commands:
                 return await self._outbox.enqueue(rid, payload, cmd.chat_jid)
             case _:
                 return await self._writer.run(_store_command, cmd)
+
+
+def _check_mentions(text: str, mentions: list[str]) -> None:
+    """Cada mención debe aparecer en el texto como `@<user>` (si no, el destinatario no la ve)."""
+    for jid in mentions:
+        user = jid.split("@", 1)[0]
+        if not user or f"@{user}" not in text:
+            raise CommandError("bad_payload", "mención sin su @ en el texto")
 
 
 def _store_command(conn: sqlite3.Connection, cmd: HandledCommand) -> Mapping[str, Any]:

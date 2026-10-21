@@ -19,6 +19,7 @@ from wsp.protocol.models import (
     History,
     ListChats,
     MarkRead,
+    Members,
     MessageDeleted,
     MessageEdited,
     MessageNew,
@@ -67,6 +68,8 @@ COMMANDS: list[Command] = [
     History(chat_jid=JID, n=3),
     Search(q="algo", limit=10),
     Mute(chat_jid=JID, until=0),
+    Members(chat_jid=JID),
+    SendText(chat_jid=JID, text="hola @5691", mentions=["5691@s.whatsapp.net"]),
 ]
 
 

@@ -26,8 +26,10 @@ from wsp.protocol.models import (
     History,
     ListChats,
     MarkRead,
+    Members,
     MessageNew,
     MessageStatus,
+    SendReply,
     SendText,
 )
 from wsp.protocol.server import CommandError, Server
@@ -59,6 +61,8 @@ class FakeDaemon:
     def __init__(self) -> None:
         self.cmds: list[HandledCommand] = []
         self.send_error: CommandError | None = None
+        self.members: list[dict[str, Any]] = []
+        self.members_error: CommandError | None = None
         self.chats = [chat(JUAN, "Juan", unread=2), chat(FAMILIA, "Familia", "group")]
         self.history = [msg("h1", body="antes"), msg("h2", body="hola", sender_jid=None)]
 
@@ -69,6 +73,12 @@ class FakeDaemon:
                 return {"chats": [c.model_dump(mode="json") for c in self.chats]}
             case History():
                 return {"messages": [m.model_dump(mode="json") for m in self.history]}
+            case Members():
+                if self.members_error is not None:
+                    raise self.members_error
+                return {"members": self.members}
+            case SendReply():
+                return {"state": "pending", "wa_id": "local-" + rid}
             case SendText():
                 if self.send_error is not None:
                     raise self.send_error
@@ -374,3 +384,68 @@ async def test_malformed_reply_is_reported(
     r = Repl(client, out, Palette(False))
     await r.handle_line("/chats")
     assert "Traceback" not in out.getvalue()
+
+
+# ---- menciones -------------------------------------------------------------------------------
+
+
+async def test_group_text_resolves_mentions(
+    client: Client, out: io.StringIO, daemon: FakeDaemon
+) -> None:
+    daemon.members = [{"jid": "5215500000009@s.whatsapp.net", "name": "Pepe"}]
+    r = Repl(client, out, Palette(False), tz=UTC)
+    await r.handle_line("/chats")
+    await r.handle_line("/open 2")
+    await r.handle_line("hola @pepe")
+    [c] = [c for c in daemon.cmds if isinstance(c, SendText)]
+    assert c.text == "hola @5215500000009" and c.mentions == ["5215500000009@s.whatsapp.net"]
+
+
+async def test_group_ambiguous_mention_prints_error_and_does_not_send(
+    client: Client, out: io.StringIO, daemon: FakeDaemon
+) -> None:
+    daemon.members = [
+        {"jid": "1@s.whatsapp.net", "name": "Pepe A"},
+        {"jid": "2@s.whatsapp.net", "name": "Pepe B"},
+    ]
+    r = Repl(client, out, Palette(False), tz=UTC)
+    await r.handle_line("/chats")
+    await r.handle_line("/open 2")
+    await r.handle_line("hola @pepe")
+    assert "ambiguo" in out.getvalue()
+    assert not any(isinstance(c, SendText) for c in daemon.cmds)
+
+
+async def test_members_failure_prints_error_and_does_not_send(
+    client: Client, out: io.StringIO, daemon: FakeDaemon
+) -> None:
+    daemon.members_error = CommandError("internal", "x")
+    r = Repl(client, out, Palette(False), tz=UTC)
+    await r.handle_line("/chats")
+    await r.handle_line("/open 2")
+    await r.handle_line("hola @pepe")
+    assert "miembros" in out.getvalue()
+    assert not any(isinstance(c, SendText) for c in daemon.cmds)
+
+
+async def test_reply_in_group_resolves_mentions(
+    client: Client, out: io.StringIO, daemon: FakeDaemon
+) -> None:
+    daemon.members = [{"jid": "5215500000009@s.whatsapp.net", "name": "Pepe"}]
+    daemon.history = [msg("h1", chat_jid=FAMILIA, body="antes")]
+    r = Repl(client, out, Palette(False), tz=UTC)
+    await r.handle_line("/chats")
+    await r.handle_line("/open 2")
+    await r.handle_line("/r 1 ok @pepe")
+    [c] = [c for c in daemon.cmds if isinstance(c, SendReply)]
+    assert c.text == "ok @5215500000009" and c.mentions == ["5215500000009@s.whatsapp.net"]
+
+
+async def test_direct_text_has_no_members_query(
+    client: Client, out: io.StringIO, daemon: FakeDaemon
+) -> None:
+    r = Repl(client, out, Palette(False), tz=UTC)
+    await r.handle_line("/chats")
+    await r.handle_line("/open 1")
+    await r.handle_line("mail a@b.com y @x")
+    assert not any(isinstance(c, Members) for c in daemon.cmds)
