@@ -481,11 +481,22 @@ async def _pump(client: Client, repl: Repl) -> None:
             repl.error(f"error interno al procesar un evento ({type(e).__name__})")
 
 
+_PERSISTED: Final = (
+    commands.ShowChats,
+    commands.Open,
+    commands.Back,
+    commands.ShowHistory,
+    commands.MuteChat,
+    commands.Help,
+    commands.Quit,
+)
+
+
 class _CommandHistory(FileHistory):
-    """Persiste solo comandos (`/…`): el texto de los mensajes (PII) no se guarda en disco."""
+    """Persiste solo comandos de navegación: ni mensajes ni búsquedas (PII) van a disco."""
 
     def store_string(self, string: str) -> None:
-        if string.startswith("/"):
+        if isinstance(commands.parse(string), _PERSISTED):
             super().store_string(string)
 
 

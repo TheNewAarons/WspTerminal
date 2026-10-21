@@ -254,10 +254,12 @@ async def test_tail_json_filters_by_chat(server: Server, sock: Path, daemon: Fak
     task, out, _ = await start_tail(server, sock, daemon, "ana", True)
     server.broadcast(msg("m1", JUAN, "ruido"))
     server.broadcast(msg("m2", ANA, "señal"))
-    await until(lambda: "señal" in out.getvalue())
+    await until(lambda: "m2" in out.getvalue())
     task.cancel()
     rows = [json.loads(line) for line in out.getvalue().splitlines()]
     assert [r["data"]["wa_id"] for r in rows] == ["m2"]
+    assert rows[0]["data"]["body"] == "señal"
+    assert "ñ" not in out.getvalue()  # ASCII puro: ningún control Unicode llega a la terminal
 
 
 async def test_tail_unknown_chat(server: Server, sock: Path) -> None:

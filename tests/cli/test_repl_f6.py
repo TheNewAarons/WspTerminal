@@ -316,3 +316,14 @@ async def test_no_notifier_means_no_error() -> None:
     r = Repl(None, io.StringIO(), Palette(False), tz=UTC)  # type: ignore[arg-type]
     r.handle(msg("m1", body="hola"))
     await drain()
+
+
+def test_history_persists_only_navigation(tmp_path: Path) -> None:
+    from wsp.cli.repl import _CommandHistory
+
+    h = _CommandHistory(str(tmp_path / "h"))
+    for line in ("/r 1 secreto", "/search tarjeta", "hola", "/open Juan", "/chats 5"):
+        h.store_string(line)
+    saved = (tmp_path / "h").read_text()
+    assert "secreto" not in saved and "tarjeta" not in saved and "hola" not in saved
+    assert "/open Juan" in saved and "/chats 5" in saved

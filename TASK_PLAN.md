@@ -2,7 +2,7 @@
 
 Estados: `[ ]` pendiente · `[~]` en curso · `[x]` hecho.
 Ids: `F<fase>.<n>`. Anti-bucle: 2 fallos consecutivos en una tarea → revertir y replantear aquí.
-Ramas: F0 `feat/f0-bootstrap`; F3 `feat/f3-daemon`; resto `phase-N-<tema>`. Un PR por fase (`gh pr create`), sin CI.
+Ramas: F0 `feat/f0-bootstrap`; F3 `feat/f3-daemon`; F5 `phase-5-repl` / `feat/f5-repl`; F6 `feat/f6-commands`; resto `phase-N-<tema>`. Un PR por fase (`gh pr create`), sin CI.
 
 ## Referencias
 
@@ -154,43 +154,47 @@ Diferidos de la revisión de seguridad de Fase 3 (0 bloqueantes; destino entre p
 
 ---
 
-## Fase 5 — REPL en vivo (rama `phase-5-repl`)
+## Fase 5 — REPL en vivo (rama `phase-5-repl` / `feat/f5-repl`) — completada salvo F5.13–F5.15 (diferidos)
 
-- [ ] **F5.1** REPL base: `PromptSession` + `patch_stdout`, prompt `› `, Ctrl-C/Ctrl-D limpios · Agente: orquestador · Deps: F4.12 · Aceptación: `uv run pytest tests/cli/test_repl_base.py -q`
-- [ ] **F5.2** Formato `[14:02] Juan › hola`, `[14:02] Familia / Ana › …`, estados ✓ ✓✓ ✗(motivo) · Agente: orquestador · Deps: F5.1 · Aceptación: `uv run pytest tests/cli/test_format.py -q`
-- [ ] **F5.3** `NO_COLOR` y `--no-color` · Agente: orquestador · Deps: F5.2 · Aceptación: `uv run pytest tests/cli/test_no_color.py -q` (sin ANSI)
-- [ ] **F5.4** Conexión al socket y bucle de eventos en vivo · Agente: orquestador · Deps: F5.1, F2.5 · Aceptación: `uv run pytest tests/cli/test_live_events.py -q`
-- [ ] **F5.5** Relleno al reconectar (`since=<último ts>`) sin pérdidas ni duplicados · Agente: orquestador · Deps: F5.4, F3.8 · Aceptación: `uv run pytest tests/cli/test_reconnect_backfill.py -q`
-- [ ] **F5.6** Indicador de conexión y mensaje claro sin daemon (sugiere `wsp daemon install`) · Agente: orquestador · Deps: F5.4 · Aceptación: `uv run pytest tests/cli/test_no_daemon.py -q` (sin traceback)
-- [ ] **F5.7** Envío de texto desde chat abierto con `request_id` · Agente: orquestador · Deps: F5.4, F3.5 · Aceptación: `uv run pytest tests/cli/test_repl_send.py -q`
-- [ ] **F5.8** Tests del REPL con daemon falso · Agente: bulk-agent · Deps: F5.7 · Aceptación: `uv run pytest tests/cli -q`
-- [ ] **F5.9** Gates en verde · Agente: orquestador · Deps: F5.8 · Aceptación: `uv run pytest && uv run ruff check && uv run ruff format --check && uv run mypy wsp`
-- [ ] **F5.10** security-reviewer sobre `git diff main...HEAD` · Agente: security-reviewer · Deps: F5.9 · Aceptación: sin bloqueantes (escapes de terminal en contenido entrante)
+- [x] **F5.1** REPL base: `PromptSession` + `patch_stdout`, prompt `› `, Ctrl-C/Ctrl-D limpios · Agente: orquestador · Deps: F4.12 · Aceptación: `uv run pytest tests/cli/test_repl_base.py -q`
+- [x] **F5.2** Formato `[14:02] Juan › hola`, `[14:02] Familia / Ana › …`, estados ✓ ✓✓ ✗(motivo) · Agente: orquestador · Deps: F5.1 · Aceptación: `uv run pytest tests/cli/test_format.py -q`
+- [x] **F5.3** `NO_COLOR` y `--no-color` · Agente: orquestador · Deps: F5.2 · Aceptación: `uv run pytest tests/cli/test_no_color.py -q` (sin ANSI)
+- [x] **F5.4** Conexión al socket y bucle de eventos en vivo · Agente: orquestador · Deps: F5.1, F2.5 · Aceptación: `uv run pytest tests/cli/test_live_events.py -q`
+- [x] **F5.5** Relleno al reconectar (`since=<último ts>`) sin pérdidas ni duplicados · Agente: orquestador · Deps: F5.4, F3.8 · Aceptación: `uv run pytest tests/cli/test_reconnect_backfill.py -q`
+- [x] **F5.6** Indicador de conexión y mensaje claro sin daemon (sugiere `wsp daemon install`) · Agente: orquestador · Deps: F5.4 · Aceptación: `uv run pytest tests/cli/test_no_daemon.py -q` (sin traceback)
+- [x] **F5.7** Envío de texto desde chat abierto con `request_id` · Agente: orquestador · Deps: F5.4, F3.5 · Aceptación: `uv run pytest tests/cli/test_repl_send.py -q`
+- [x] **F5.8** Tests del REPL con daemon falso · Agente: bulk-agent · Deps: F5.7 · Aceptación: `uv run pytest tests/cli -q`
+- [x] **F5.9** Gates en verde · Agente: orquestador · Deps: F5.8 · Aceptación: `uv run pytest && uv run ruff check && uv run ruff format --check && uv run mypy wsp`
+- [x] **F5.10** security-reviewer sobre `git diff main...HEAD` · Agente: security-reviewer · Deps: F5.9 · Aceptación: sin bloqueantes (escapes de terminal en contenido entrante); correcciones aplicadas en 9749831
 - [ ] **F5.11** PR fase 5 · Agente: orquestador · Deps: F5.10 · Aceptación: `gh pr view --json state,mergeable`
-- [ ] **F5.12** Cierre: actualizar TASK_PLAN.md · Agente: planner · Deps: F5.11 · Aceptación: sin `[~]` en fase 5
-- [ ] **F5.13** (B6, trasladado de F1) Paginar `messages_since` con cursor `(ts,id)` · Agente: orquestador · Deps: F5.5 · Aceptación: `uv run pytest tests/cli/test_reconnect_backfill.py -q` (sin saltos ni duplicados entre páginas; completar antes de F5.9)
+- [x] **F5.12** Cierre: actualizar TASK_PLAN.md · Agente: planner · Deps: F5.10 · Aceptación: sin `[~]` en fase 5
+- [ ] **F5.13** (pendiente/diferido; B6, trasladado de F1) Paginar `messages_since` con cursor `(ts,id)` · Agente: orquestador · Deps: F5.5 · Aceptación: `uv run pytest tests/cli/test_reconnect_backfill.py -q` (sin saltos ni duplicados entre páginas)
 - [ ] **F5.14** (M3, trasladado de F2) Cursor `since` basado en ts puede perder mensajes viejos que llegan tarde; usar cursor por rowid/secuencia monótona en handshake `since`, `messages_since` y cliente · Agente: orquestador · Deps: F5.5 · Aceptación: `uv run pytest tests/cli/test_reconnect_backfill.py -q` (mensaje con ts antiguo insertado tarde se entrega; completar junto con F5.13)
+- [ ] **F5.15** (pendiente/diferido; hallazgo #8 seguridad F5) Filtro final de ESC/control en `_emit` como defensa en profundidad · Agente: orquestador · Deps: F5.10 · Aceptación: `uv run pytest tests/cli/test_format.py -q` (ninguna secuencia ESC llega a la terminal desde `_emit`)
 
 ---
 
-## Fase 6 — Comandos, notificaciones, send/tail (rama `phase-6-comandos`)
+## Fase 6 — Comandos, notificaciones, send/tail (rama `feat/f6-commands`)
 
-- [ ] **F6.1** `/chats [n]`, `/open <chat>` (autocompletado difuso con rapidfuzz), `/back` · Agente: orquestador · Deps: F5.12 · Aceptación: `uv run pytest tests/cli/test_cmd_chats.py -q`
-- [ ] **F6.2** `/r <n> <texto>` y `/react <n> <emoji>` · Agente: orquestador · Deps: F6.1 · Aceptación: `uv run pytest tests/cli/test_cmd_reply_react.py -q`
-- [ ] **F6.3** `/search <texto>` (FTS5, consulta con caracteres especiales segura) y `/history [n]` · Agente: orquestador · Deps: F6.1, F1.5 · Aceptación: `uv run pytest tests/cli/test_cmd_search_history.py -q`
-- [ ] **F6.4** `/mute <chat> <dur>` (30m, 8h, 1d; expira solo) · Agente: orquestador · Deps: F6.1 · Aceptación: `uv run pytest tests/cli/test_cmd_mute.py -q`
-- [ ] **F6.5** `/help` y `/quit` · Agente: bulk-agent · Deps: F6.1 · Aceptación: `uv run pytest tests/cli/test_cmd_help_quit.py -q`
-- [ ] **F6.6** Notificaciones osascript (desactivables, escapado seguro, respetan mute) · Agente: orquestador · Deps: F6.4 · Aceptación: `uv run pytest tests/cli/test_notify.py -q` (sin inyección AppleScript)
-- [ ] **F6.7** `wsp send <chat> <texto>` (exit 0 al confirmar; ambigüedad falla) · Agente: orquestador · Deps: F5.7 · Aceptación: `uv run pytest tests/cli/test_send_cmd.py -q`
-- [ ] **F6.8** `wsp tail [chat]` (apto para pipes, sin color en no-TTY, SIGINT/SIGPIPE limpios) · Agente: orquestador · Deps: F5.4 · Aceptación: `uv run pytest tests/cli/test_tail_cmd.py -q`
-- [ ] **F6.9** Tests de comandos, send, tail y notificaciones (osascript simulado) · Agente: bulk-agent · Deps: F6.8 · Aceptación: `uv run pytest tests/cli -q`
-- [ ] **F6.10** README/man: pair, daemon, REPL, send, tail · Agente: bulk-agent · Deps: F6.8 · Aceptación: `grep -cE "wsp (pair|daemon|send|tail)" README.md` ≥ 4
-- [ ] **F6.11** Gates en verde · Agente: orquestador · Deps: F6.9, F6.10 · Aceptación: `uv run pytest && uv run ruff check && uv run ruff format --check && uv run mypy wsp`
-- [ ] **F6.12** Refactor fases 5–6 (duplicación, async bloqueante, cancelación; latencia p50/p95 antes/después; sin cambio de comportamiento) · Agente: refactor-agent · Deps: F6.11 · Aceptación: `uv run pytest -q` idéntico antes/después; métricas en Bitácora
-- [ ] **F6.13** Gates tras refactor · Agente: orquestador · Deps: F6.12 · Aceptación: `uv run pytest && uv run ruff check && uv run ruff format --check && uv run mypy wsp`
-- [ ] **F6.14** security-reviewer sobre `git diff main...HEAD` · Agente: security-reviewer · Deps: F6.13 · Aceptación: sin bloqueantes (osascript, argv, PII)
-- [ ] **F6.15** PR fase 6 · Agente: orquestador · Deps: F6.14 · Aceptación: `gh pr view --json state,mergeable`
-- [ ] **F6.16** Cierre: actualizar TASK_PLAN.md · Agente: planner · Deps: F6.15 · Aceptación: `grep -c "^- \[ \]\|^- \[~\]" TASK_PLAN.md` = 0
+- [x] **F6.1** `wsp/cli/commands.py`: parser puro de comandos + `resolve_chat` difuso (rapidfuzz) · Agente: orquestador · Deps: F5.10 · Aceptación: `uv run pytest tests/cli -q`
+- [x] **F6.2** Autocompletado (`wsp/cli/completer.py`) · Agente: orquestador · Deps: F6.1 · Aceptación: `uv run pytest tests/cli -q`
+- [x] **F6.3** Notificaciones osascript vía argv (sin inyección), detección de foco y `notifications=false` · Agente: orquestador · Deps: F6.1 · Aceptación: `uv run pytest tests/cli/test_notify.py -q`
+- [x] **F6.4** Mensajes numerados; `/r`, `/react`, `/search`, `/mute`, `/history` · Agente: orquestador · Deps: F6.1 · Aceptación: `uv run pytest tests/cli -q`
+- [x] **F6.5** `list_chats` con alias/push_name y orden pinned + último mensaje · Agente: database-agent · Deps: F6.4 · Aceptación: `uv run pytest tests/store -q`; EXPLAIN con 100k mensajes no re-medido (ver F6.12)
+- [x] **F6.6** `wsp send`, `wsp tail`, `wsp config` (SIGPIPE, `--json`, `--wait-delivered`, códigos de salida 0/1/2/4/5) · Agente: orquestador · Deps: F6.4 · Aceptación: `uv run pytest tests/cli -q`
+- [x] **F6.7** Tests de comandos, notify, send/tail y REPL f6; README completo · Agente: bulk-agent · Deps: F6.6 · Aceptación: `uv run pytest tests/cli -q`
+- [x] **F6.8** Refactor fases 5–6: helpers compartidos, `aclose` de tareas, latencia sin regresión (ver Bitácora) · Agente: refactor-agent · Deps: F6.7 · Aceptación: `uv run pytest -q` idéntico antes/después; métricas en Bitácora
+- [x] **F6.9** security-reviewer sobre `git diff main...HEAD`: 0 bloqueantes/altos; medios 1 (historial guardaba `/r` y `/search`; ahora solo navegación) y 2 (`tail --json` con `ensure_ascii=True`) corregidos · Agente: security-reviewer · Deps: F6.8 · Aceptación: sin bloqueantes
+- [ ] **F6.10** PR fase 6 (`feat/f6-commands`) · Agente: orquestador · Deps: F6.9 · Aceptación: `gh pr view --json state,mergeable`
+- [ ] **F6.11** Cierre: actualizar TASK_PLAN.md · Agente: planner · Deps: F6.10 · Aceptación: sin `[~]` en fase 6
+
+Pendientes bajos de la revisión de seguridad F6 (diferidos):
+
+- [ ] **F6.12** Benchmark `list_chats` con 100k mensajes + EXPLAIN (`tools/seed_fake.py`, `docs/query-plans.md`) · Agente: database-agent · Deps: F6.5 · Aceptación: sin full scan; tiempos en Bitácora
+- [ ] **F6.13** Notificación con solo remitente (opción de configuración) · Agente: orquestador · Deps: F6.3 · Aceptación: `uv run pytest tests/cli/test_notify.py -q`
+- [ ] **F6.14** Tope de stdin en bytes alineado con `MAX_TEXT` en `wsp send` · Agente: orquestador · Deps: F6.6 · Aceptación: `uv run pytest tests/cli -q` (stdin sobre el tope rechazado)
+- [ ] **F6.15** Validar propietario/permisos de `config.toml` · Agente: orquestador · Deps: F6.6 · Aceptación: `uv run pytest tests/cli -q` (archivo ajeno o con permisos abiertos se rechaza)
+- [ ] **F6.16** pip-audit fuera del sandbox (ver F3.36) · Agente: usuario · Deps: — · Aceptación: `uv export --no-dev | uvx pip-audit -r /dev/stdin`
 
 ---
 
@@ -207,4 +211,6 @@ Diferidos de la revisión de seguridad de Fase 3 (0 bloqueantes; destino entre p
 2026-10-20 · F3 · F3 iniciada en feat/f3-daemon; libmagic ausente en el equipo: neonize no importa hasta `brew install libmagic` (necesario solo para la prueba manual; tests usan cliente falso).
 2026-10-20 · F3 · Fase 3 cerrada salvo F3.19 (umask en Server.start(), mitigado: wspd/pair fijan 077) y F3.27 (prueba manual del usuario: `brew install libmagic ffmpeg`, `wsp pair`, `uv run wspd`, `sqlite3`). F3.13 (PR) pendiente.
 2026-10-20 · F3 · security-reviewer: 0 bloqueantes. Corregidos: umask+finally en pair, orden de apagado (outbox, sesión, socket), timeout sin reintento, format_exc_info antes de redact, not_found en react, lock antes de logging, SIGHUP, .gitignore. Diferidos: F3.28–F3.40.
+2026-10-20 · F5 · Fase 5 completada (security-reviewer corregido en 9749831). Diferidos: F5.13 (paginación por cursor), F5.14 (cursor monótono), F5.15 (filtro ESC final en `_emit`, hallazgo #8). F5.11 (PR) pendiente.
+2026-10-20 · F6 · Fase 6 hecha en `feat/f6-commands`; security-reviewer 0 bloqueantes/altos, medios 1 y 2 corregidos; bajos diferidos F6.12–F6.16. Refactor sin regresión: 200/s con render p50 1.23→1.19 ms, p95 2.12→2.17 ms; ráfaga con render p50 0.38→0.37 ms, p95 0.49→0.45 ms. Enfoques descartados: ninguno. F6.10 (PR) pendiente.
 2026-10-20 · F3 · Decisión history-sync: persistir mensajes sin emitirlos, emitir solo ChatUpdated (evita inundar clientes; el relleno va por `since`). libmagic/ffmpeg requeridos para neonize real (no para tests).

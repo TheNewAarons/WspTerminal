@@ -167,7 +167,7 @@ async def tail(
                     continue
                 if as_json:
                     env = to_envelope(ev).model_dump(mode="json", exclude={"request_id"})
-                    out.write(json.dumps(env, ensure_ascii=False, separators=(",", ":")) + "\n")
+                    out.write(json.dumps(env, ensure_ascii=True, separators=(",", ":")) + "\n")
                     out.flush()
                 else:
                     repl.handle(ev)
