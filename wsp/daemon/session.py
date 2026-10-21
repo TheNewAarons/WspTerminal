@@ -24,6 +24,8 @@ log = logging.getLogger(__name__)
 
 EXIT_ALREADY_RUNNING: Final = 2
 LOCK_NAME: Final = "wspd.lock"
+PAIR_PHONE_RETRIES: Final = 20
+PAIR_PHONE_DELAY: Final = 0.5
 _SESSION_SUFFIXES: Final = ("", "-wal", "-shm", "-journal")
 _STATE_LABELS: Final = ("pairing", "connected", "disconnected", "logged_out")
 
@@ -342,4 +344,12 @@ class NeonizeClient:
         return SendResult(wa_id=str(resp.ID), ts=norm_ts(resp.Timestamp))
 
     async def pair_phone(self, phone: str) -> str:
-        return str(await self._c.PairPhone(phone, True))
+        # connect() devuelve antes de que el cliente nativo exista: reintentar mientras sea nil.
+        for attempt in range(PAIR_PHONE_RETRIES):
+            try:
+                return str(await self._c.PairPhone(phone, True))
+            except Exception as e:
+                if "client is nil" not in str(e) or attempt == PAIR_PHONE_RETRIES - 1:
+                    raise
+                await asyncio.sleep(PAIR_PHONE_DELAY)
+        raise AssertionError("inalcanzable")
