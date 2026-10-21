@@ -99,7 +99,7 @@ def write_plist(wspd: Path) -> Path:
     for name in (STDOUT_NAME, STDERR_NAME):
         _touch_private(paths.state_dir() / name)
     target = plist_path()
-    target.parent.mkdir(parents=True, exist_ok=True)
+    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if target.is_symlink():
         raise PermissionError("el plist no puede ser un symlink")
     tmp = target.with_name(target.name + ".tmp")
