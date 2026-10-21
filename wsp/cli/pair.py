@@ -20,6 +20,7 @@ from wsp.daemon.session import (
 )
 
 PAIR_TIMEOUT: Final = 180.0
+SETTLE_SECONDS: Final = 10.0  # deja terminar reconexión y subida de prekeys antes de cortar
 _PHONE_RE: Final = re.compile(r"\+?\d{8,15}")
 _CONNECTED: Final = frozenset({"ConnectedEv", "PairStatusEv"})
 
@@ -37,13 +38,18 @@ async def pair(
     out: TextIO,
     phone: str | None = None,
     wait_seconds: float = PAIR_TIMEOUT,
+    settle_seconds: float | None = None,
 ) -> bool:
-    """Conecta y espera el vínculo. True si quedó conectado dentro del tiempo."""
+    """Conecta y espera el vínculo. True si quedó conectado y estable dentro del tiempo."""
+    settle = SETTLE_SECONDS if settle_seconds is None else settle_seconds
     connected = asyncio.Event()
+    logged_out = asyncio.Event()
 
     async def on_event(kind: str, _ev: Any) -> None:
         if kind in _CONNECTED:
             connected.set()
+        elif kind == "LoggedOutEv":
+            logged_out.set()
 
     async def on_qr(data: bytes) -> None:
         if phone is None:
@@ -60,6 +66,11 @@ async def pair(
             out.flush()
         async with asyncio.timeout(wait_seconds):
             await connected.wait()
+        with contextlib.suppress(TimeoutError):
+            async with asyncio.timeout(settle):
+                await logged_out.wait()
+        if logged_out.is_set():
+            return False
     except TimeoutError:
         return False
     finally:
