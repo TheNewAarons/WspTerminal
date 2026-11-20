@@ -118,6 +118,8 @@ class ChatUpdated(Payload):
     archived: bool = False
     muted_until: Ts = 0
     pinned: bool = False
+    alias: Annotated[str, StringConstraints(max_length=256)] | None = None
+    push_name: Annotated[str, StringConstraints(max_length=256)] | None = None
 
 
 class Presence(Payload):

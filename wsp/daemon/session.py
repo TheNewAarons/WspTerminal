@@ -17,6 +17,7 @@ from typing import Any, Final, Protocol
 
 from wsp import paths
 from wsp.daemon.config import ReconnectConfig
+from wsp.daemon.ts import norm_ts
 from wsp.protocol.models import AccountState
 
 log = logging.getLogger(__name__)
@@ -259,12 +260,6 @@ _NEONIZE_EVENTS: Final = (
     "KeepAliveTimeoutEv",
     "PairStatusEv",
 )
-
-
-def norm_ts(ts: int) -> int:
-    """Segundos Unix; neonize puede entregar milisegundos."""
-    ts = int(ts)
-    return ts // 1000 if ts > 10**11 else ts
 
 
 def split_jid(jid: str) -> tuple[str, str]:

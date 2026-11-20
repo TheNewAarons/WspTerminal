@@ -597,3 +597,26 @@ def test_error_redaction(conn: sqlite3.Connection) -> None:
     assert repo.outbox_fail(conn, "r1", raw) is True
     oerr = conn.execute("SELECT error FROM outbox").fetchone()[0]
     assert oerr == err
+
+
+def test_list_chats_pinned_first_then_recent_nulls_last(conn: sqlite3.Connection) -> None:
+    repo.upsert_message(conn, MessageIn("old@s.whatsapp.net", "1", 10))
+    repo.upsert_message(conn, MessageIn("new@s.whatsapp.net", "1", 30))
+    repo.upsert_message(conn, MessageIn("pin@s.whatsapp.net", "1", 5))
+    repo.upsert_chat(conn, "pin@s.whatsapp.net", pinned=True)
+    repo.upsert_chat(conn, "empty@s.whatsapp.net")
+    assert [c.jid for c in repo.list_chats(conn)] == [
+        "pin@s.whatsapp.net",
+        "new@s.whatsapp.net",
+        "old@s.whatsapp.net",
+        "empty@s.whatsapp.net",
+    ]
+
+
+def test_list_chats_joins_contact(conn: sqlite3.Connection) -> None:
+    repo.upsert_message(conn, MessageIn("a@s.whatsapp.net", "1", 20))
+    repo.upsert_message(conn, MessageIn("b@s.whatsapp.net", "1", 10))
+    repo.upsert_contact(conn, "a@s.whatsapp.net", push_name="Ana", alias="Anita", updated_at=1)
+    a, b = repo.list_chats(conn)
+    assert (a.alias, a.push_name) == ("Anita", "Ana")
+    assert (b.alias, b.push_name) == (None, None)

@@ -22,19 +22,20 @@ from wsp.protocol.models import (
 )
 from wsp.protocol.server import CommandError
 from wsp.store import repo
+from wsp.store.writer import Writer
 
 SECRET = "token-supersecreto-123"  # noqa: S105
 
 
 class Rig:
-    def __init__(self, conn: sqlite3.Connection, cfg: OutboxConfig) -> None:
+    def __init__(self, conn: sqlite3.Connection, writer: Writer, cfg: OutboxConfig) -> None:
         self.conn = conn
         self.client = FakeClient()
         self.events: list[Event] = []
         self.sleeps: list[float] = []
         self.clock = FakeClock()
         self.outbox = Outbox(
-            conn,
+            writer,
             self.client,
             cfg,
             self.events.append,
@@ -42,7 +43,7 @@ class Rig:
             sleep=self.sleep,
             now=lambda: 1_700_000_000,
         )
-        self.commands = Commands(conn, self.outbox)
+        self.commands = Commands(writer, self.outbox)
 
     async def sleep(self, delay: float) -> None:
         self.sleeps.append(delay)
@@ -61,8 +62,10 @@ class Rig:
 
 
 @pytest.fixture
-def rig(conn: sqlite3.Connection) -> Rig:
-    return Rig(conn, OutboxConfig(rate_per_sec=10, burst=10, max_attempts=3, retry_base=1.0))
+def rig(conn: sqlite3.Connection, writer: Writer) -> Rig:
+    return Rig(
+        conn, writer, OutboxConfig(rate_per_sec=10, burst=10, max_attempts=3, retry_base=1.0)
+    )
 
 
 # ---- TokenBucket --------------------------------------------------------------------------
@@ -107,7 +110,7 @@ async def test_bucket_acquire_waits() -> None:
 
 
 async def test_enqueue_creates_pending_placeholder_and_emits(rig: Rig) -> None:
-    res = rig.outbox.enqueue("r1", {"kind": "text", "text": "hola"}, DIRECT_STR)
+    res = await rig.outbox.enqueue("r1", {"kind": "text", "text": "hola"}, DIRECT_STR)
     assert res == {"state": "queued", "wa_id": "wsp:r1"}
     row = rig.message("wsp:r1")
     assert row is not None and (row.status, row.from_me, row.body) == ("pending", True, "hola")
@@ -116,7 +119,7 @@ async def test_enqueue_creates_pending_placeholder_and_emits(rig: Rig) -> None:
 
 
 async def test_send_rebinds_to_real_id_and_marks_sent(rig: Rig) -> None:
-    rig.outbox.enqueue("r1", {"kind": "text", "text": "hola"}, DIRECT_STR)
+    await rig.outbox.enqueue("r1", {"kind": "text", "text": "hola"}, DIRECT_STR)
     assert await rig.drain() == 1
     assert rig.message("wsp:r1") is None
     row = rig.message("WA1")
@@ -129,10 +132,10 @@ async def test_send_rebinds_to_real_id_and_marks_sent(rig: Rig) -> None:
 
 async def test_request_id_is_idempotent(rig: Rig) -> None:
     payload = {"kind": "text", "text": "hola"}
-    rig.outbox.enqueue("r1", payload, DIRECT_STR)
+    await rig.outbox.enqueue("r1", payload, DIRECT_STR)
     await rig.drain()
     n_events = len(rig.events)
-    again = rig.outbox.enqueue("r1", payload, DIRECT_STR)
+    again = await rig.outbox.enqueue("r1", payload, DIRECT_STR)
     assert again == {"state": "done", "wa_id": "WA1"}
     assert await rig.drain() == 0
     assert len(rig.client.sent) == 1
@@ -141,8 +144,8 @@ async def test_request_id_is_idempotent(rig: Rig) -> None:
 
 
 async def test_same_request_id_while_queued_does_not_duplicate(rig: Rig) -> None:
-    rig.outbox.enqueue("r1", {"kind": "text", "text": "a"}, DIRECT_STR)
-    res = rig.outbox.enqueue("r1", {"kind": "text", "text": "b"}, DIRECT_STR)
+    await rig.outbox.enqueue("r1", {"kind": "text", "text": "a"}, DIRECT_STR)
+    res = await rig.outbox.enqueue("r1", {"kind": "text", "text": "b"}, DIRECT_STR)
     assert res["state"] == "queued"
     await rig.drain()
     assert rig.client.sent == [(DIRECT_STR, "a", None, None)]
@@ -150,7 +153,7 @@ async def test_same_request_id_while_queued_does_not_duplicate(rig: Rig) -> None
 
 async def test_retries_with_backoff_then_succeeds(rig: Rig) -> None:
     rig.client.send_errors = [RuntimeError(SECRET), RuntimeError(SECRET)]
-    rig.outbox.enqueue("r1", {"kind": "text", "text": "hola"}, DIRECT_STR)
+    await rig.outbox.enqueue("r1", {"kind": "text", "text": "hola"}, DIRECT_STR)
     assert await rig.drain() == 3
     assert rig.sleeps == [1.0, 2.0]
     row = rig.message("WA1")
@@ -164,7 +167,7 @@ async def test_retries_with_backoff_then_succeeds(rig: Rig) -> None:
 async def test_fails_with_stable_code(rig: Rig, exc: Exception, code: str, attempts: int) -> None:
     # Un timeout pudo enviar el mensaje: falla de inmediato, sin reintento (evita duplicados).
     rig.client.send_errors = [exc, exc, exc, exc]
-    rig.outbox.enqueue("r1", {"kind": "text", "text": "hola"}, DIRECT_STR)
+    await rig.outbox.enqueue("r1", {"kind": "text", "text": "hola"}, DIRECT_STR)
     assert await rig.drain() == attempts
     assert len(rig.client.sent) == attempts
     assert rig.sleeps == [1.0, 2.0][: attempts - 1]
@@ -177,7 +180,7 @@ async def test_fails_with_stable_code(rig: Rig, exc: Exception, code: str, attem
     assert SECRET not in repr(rig.events)
     assert SECRET not in str(item)
     # reintentar el mismo request_id devuelve el fallo previo sin reenviar
-    assert rig.outbox.enqueue("r1", {"kind": "text", "text": "hola"}, DIRECT_STR) == {
+    assert await rig.outbox.enqueue("r1", {"kind": "text", "text": "hola"}, DIRECT_STR) == {
         "state": "failed",
         "wa_id": "wsp:r1",
         "error": code,
@@ -185,10 +188,10 @@ async def test_fails_with_stable_code(rig: Rig, exc: Exception, code: str, attem
     assert await rig.drain() == 0
 
 
-async def test_bucket_throttles_sends(conn: sqlite3.Connection) -> None:
-    rig = Rig(conn, OutboxConfig(rate_per_sec=1, burst=1, max_attempts=1, retry_base=1.0))
-    rig.outbox.enqueue("r1", {"kind": "text", "text": "a"}, DIRECT_STR)
-    rig.outbox.enqueue("r2", {"kind": "text", "text": "b"}, DIRECT_STR)
+async def test_bucket_throttles_sends(conn: sqlite3.Connection, writer: Writer) -> None:
+    rig = Rig(conn, writer, OutboxConfig(rate_per_sec=1, burst=1, max_attempts=1, retry_base=1.0))
+    await rig.outbox.enqueue("r1", {"kind": "text", "text": "a"}, DIRECT_STR)
+    await rig.outbox.enqueue("r2", {"kind": "text", "text": "b"}, DIRECT_STR)
     await rig.drain()
     assert rig.sleeps == [pytest.approx(1.0)]
     assert len(rig.client.sent) == 2
@@ -242,7 +245,7 @@ async def test_react_failure_does_not_touch_messages(rig: Rig) -> None:
 
 async def test_stopping_prevents_retry(rig: Rig) -> None:
     rig.client.send_errors = [RuntimeError(SECRET)]
-    rig.outbox.enqueue("r1", {"kind": "text", "text": "x"}, DIRECT_STR)
+    await rig.outbox.enqueue("r1", {"kind": "text", "text": "x"}, DIRECT_STR)
     await rig.outbox.stop()
     await rig.drain()
     item = repo.outbox_get(rig.conn, "r1")
@@ -251,7 +254,7 @@ async def test_stopping_prevents_retry(rig: Rig) -> None:
 
 async def test_worker_loop_sends_in_background(rig: Rig) -> None:
     rig.outbox.start()
-    rig.outbox.enqueue("r1", {"kind": "text", "text": "x"}, DIRECT_STR)
+    await rig.outbox.enqueue("r1", {"kind": "text", "text": "x"}, DIRECT_STR)
     await rig.outbox.stop(drain_seconds=2.0)
     # stop() marca _stopping: el worker puede o no haber tomado el elemento, pero no revienta
     item = repo.outbox_get(rig.conn, "r1")

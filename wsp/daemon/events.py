@@ -14,6 +14,7 @@ from typing import Any, Final
 
 from pydantic import ValidationError
 
+from wsp.daemon.ts import norm_ts
 from wsp.protocol.models import (
     ChatUpdated,
     Event,
@@ -24,7 +25,9 @@ from wsp.protocol.models import (
     Presence,
     Reaction,
 )
+from wsp.protocol.rows import message_in
 from wsp.store import repo
+from wsp.store.writer import Writer
 
 log = logging.getLogger(__name__)
 
@@ -111,11 +114,6 @@ def jid_str(jid: Any) -> str | None:
     return f"{user}@{server}" if user else server
 
 
-def norm_ts(ts: Any) -> int:
-    value = int(ts or 0)
-    return value // 1000 if value > 10**11 else value
-
-
 def _text_of(msg: Any) -> str | None:
     if getattr(msg, "conversation", ""):
         return str(msg.conversation)
@@ -171,6 +169,21 @@ def _content(raw: Any) -> _Content:
 # ---- traducción por tipo de evento --------------------------------------------------------
 
 
+def _message_new(
+    chat: str, wa_id: str, sender: str | None, from_me: bool, ts: int, c: _Content
+) -> MessageNew:
+    return MessageNew(
+        chat_jid=chat,
+        wa_id=wa_id,
+        sender_jid=sender,
+        from_me=from_me,
+        ts=ts,
+        kind=c.kind,
+        body=c.body,
+        quoted_wa_id=c.quoted_wa_id,
+    )
+
+
 def _message(ev: Any, me_jid: str) -> list[Translated]:
     info = ev.Info
     src = info.MessageSource
@@ -188,43 +201,28 @@ def _message(ev: Any, me_jid: str) -> list[Translated]:
     pushname = str(getattr(info, "Pushname", "") or "")
     if pushname and sender and not from_me:
         out.append(ContactSeen(sender, pushname))
+    payload: Event
     if c.kind == "revoke":
         if c.revoke_target is None:
             raise Untranslatable("message")
-        item = Item(MessageDeleted(chat_jid=chat, wa_id=c.revoke_target, deleted_at=ts))
+        payload = MessageDeleted(chat_jid=chat, wa_id=c.revoke_target, deleted_at=ts)
     elif c.kind == "edit":
         if c.edit_target is None or c.body is None:
             raise Untranslatable("message")
-        item = Item(MessageEdited(chat_jid=chat, wa_id=c.edit_target, body=c.body, edited_at=ts))
+        payload = MessageEdited(chat_jid=chat, wa_id=c.edit_target, body=c.body, edited_at=ts)
     elif c.kind == "reaction":
         if c.reaction_target is None:
             raise Untranslatable("message")
-        item = Item(
-            Reaction(
-                chat_jid=chat,
-                wa_id=c.reaction_target,
-                sender_jid=sender or me_jid,
-                emoji=c.body or "",
-                ts=ts,
-            )
+        payload = Reaction(
+            chat_jid=chat,
+            wa_id=c.reaction_target,
+            sender_jid=sender or me_jid,
+            emoji=c.body or "",
+            ts=ts,
         )
     else:
-        item = Item(
-            MessageNew(
-                chat_jid=chat,
-                wa_id=wa_id,
-                sender_jid=sender,
-                from_me=from_me,
-                ts=ts,
-                kind=c.kind,
-                body=c.body,
-                quoted_wa_id=c.quoted_wa_id,
-                status="sent",
-            )
-        )
-    out.append(
-        Item(item.payload, sender_jid=sender, from_me=from_me, count_unread=item.count_unread)
-    )
+        payload = _message_new(chat, wa_id, sender, from_me, ts, c)
+    out.append(Item(payload, sender_jid=sender, from_me=from_me))
     return out
 
 
@@ -296,7 +294,7 @@ def _history(ev: Any, me_jid: str) -> list[Translated]:
             if not wa_id:
                 continue
             from_me = bool(key.fromMe)
-            part = jid_str_from_str(getattr(key, "participant", "") or "")
+            part = str(getattr(key, "participant", "") or "") or None
             sender = None if from_me else (part or chat)
             try:
                 c = _content(wmi.message)
@@ -306,16 +304,7 @@ def _history(ev: Any, me_jid: str) -> list[Translated]:
                 continue
             out.append(
                 Item(
-                    MessageNew(
-                        chat_jid=chat,
-                        wa_id=wa_id,
-                        sender_jid=sender,
-                        from_me=from_me,
-                        ts=norm_ts(wmi.messageTimestamp),
-                        kind=c.kind,
-                        body=c.body,
-                        quoted_wa_id=c.quoted_wa_id,
-                    ),
+                    _message_new(chat, wa_id, sender, from_me, norm_ts(wmi.messageTimestamp), c),
                     sender_jid=sender,
                     from_me=from_me,
                     emit=False,
@@ -323,10 +312,6 @@ def _history(ev: Any, me_jid: str) -> list[Translated]:
                 )
             )
     return out
-
-
-def jid_str_from_str(jid: str) -> str | None:
-    return jid or None
 
 
 def translate(kind: str, ev: Any, me_jid: str = "me") -> list[Translated]:
@@ -351,17 +336,26 @@ def translate(kind: str, ev: Any, me_jid: str = "me") -> list[Translated]:
 # ---- persistencia + emisión ---------------------------------------------------------------
 
 
+@dataclass(frozen=True, slots=True)
+class _Outcome:
+    """Resultado de persistir un item (calculado en el hilo del writer)."""
+
+    changed: bool = False
+    collision: bool = False
+    error: str | None = None  # nombre del tipo de excepción sqlite3 (sin contenido)
+
+
 class Bridge:
     """Traduce, persiste (commit) y recién entonces emite."""
 
     def __init__(
         self,
-        conn: sqlite3.Connection,
+        writer: Writer,
         emit: Callable[[Event], None],
         *,
         me_jid: str = "me",
     ) -> None:
-        self._conn = conn
+        self._writer = writer
         self._emit = emit
         self.me_jid = me_jid
         self.stats: Counter[str] = Counter()  # contadores sin PII
@@ -377,47 +371,55 @@ class Bridge:
             self.stats["bad_event"] += 1
             log.warning("evento no traducible type=%s exc=%s", kind, type(e).__name__)
             return
-        for item in items:
-            try:
-                changed = self._persist(item)
-            except sqlite3.Error as e:
+        if all(_is_ephemeral(i) for i in items):  # presencia: nada que persistir, sin salto de hilo
+            outcomes = [_Outcome(changed=True)] * len(items)
+        else:
+            # Un solo salto al hilo por evento (history sync trae miles de items); cada operación
+            # del repo conserva su propio commit. Todo se persiste antes de emitir.
+            outcomes = await self._writer.run(_persist_all, items)
+        for item, out in zip(items, outcomes, strict=True):
+            if out.collision:
+                self.stats["collision"] += 1
+            if out.error is not None:
                 self.stats["db_error"] += 1
-                log.error("persistencia falló type=%s exc=%s", kind, type(e).__name__)
+                log.error("persistencia falló type=%s exc=%s", kind, out.error)
                 continue
-            if changed and isinstance(item, Item) and item.emit:
+            if out.changed and isinstance(item, Item) and item.emit:
                 self._emit(item.payload)
 
-    def _persist(self, item: Translated) -> bool:
-        """True si hay algo nuevo que emitir. Cada operación del repo hace su propio commit."""
-        conn = self._conn
-        if isinstance(item, ContactSeen):
-            repo.upsert_contact(conn, item.jid, push_name=item.push_name)
-            return False
-        p = item.payload
-        match p:
-            case MessageNew():
-                res = repo.upsert_message(
-                    conn,
-                    repo.MessageIn(
-                        chat_jid=p.chat_jid,
-                        wa_id=p.wa_id,
-                        ts=p.ts,
-                        from_me=p.from_me,
-                        sender_jid=item.sender_jid,
-                        kind=p.kind,
-                        body=p.body,
-                        quoted_wa_id=p.quoted_wa_id,
-                        status=p.status,
-                    ),
-                    count_unread=item.count_unread,
-                )
-                if not res.applied:
-                    self.stats["collision"] += 1
-                return res.applied and res.inserted
-            case MessageStatus():
-                return repo.update_status(conn, p.chat_jid, p.wa_id, p.status, p.error)
-            case MessageEdited():
-                return repo.apply_edit(
+
+def _is_ephemeral(item: Translated) -> bool:
+    return isinstance(item, Item) and isinstance(item.payload, Presence)
+
+
+def _persist_all(conn: sqlite3.Connection, items: list[Translated]) -> list[_Outcome]:
+    """Corre en el hilo del writer; un error SQLite de un item no aborta los siguientes."""
+    outcomes: list[_Outcome] = []
+    for item in items:
+        try:
+            outcomes.append(_persist(conn, item))
+        except sqlite3.Error as e:
+            outcomes.append(_Outcome(error=type(e).__name__))
+    return outcomes
+
+
+def _persist(conn: sqlite3.Connection, item: Translated) -> _Outcome:
+    """`changed` si hay algo nuevo que emitir. Cada operación del repo hace su propio commit."""
+    if isinstance(item, ContactSeen):
+        repo.upsert_contact(conn, item.jid, push_name=item.push_name)
+        return _Outcome()
+    p = item.payload
+    match p:
+        case MessageNew():
+            res = repo.upsert_message(conn, message_in(p), count_unread=item.count_unread)
+            return _Outcome(changed=res.applied and res.inserted, collision=not res.applied)
+        case MessageStatus():
+            return _Outcome(
+                changed=repo.update_status(conn, p.chat_jid, p.wa_id, p.status, p.error)
+            )
+        case MessageEdited():
+            return _Outcome(
+                changed=repo.apply_edit(
                     conn,
                     p.chat_jid,
                     p.wa_id,
@@ -426,8 +428,10 @@ class Bridge:
                     sender_jid=item.sender_jid,
                     from_me=item.from_me,
                 )
-            case MessageDeleted():
-                return repo.apply_delete(
+            )
+        case MessageDeleted():
+            return _Outcome(
+                changed=repo.apply_delete(
                     conn,
                     p.chat_jid,
                     p.wa_id,
@@ -435,13 +439,14 @@ class Bridge:
                     sender_jid=item.sender_jid,
                     from_me=item.from_me,
                 )
-            case Reaction():
-                repo.upsert_reaction(conn, p.chat_jid, p.wa_id, p.sender_jid, p.emoji, p.ts)
-                return True
-            case ChatUpdated():
-                repo.upsert_chat(conn, p.jid, kind=p.kind, title=p.title)
-                return True
-            case Presence():
-                return True  # efímera: no se persiste
-            case _:
-                return False
+            )
+        case Reaction():
+            repo.upsert_reaction(conn, p.chat_jid, p.wa_id, p.sender_jid, p.emoji, p.ts)
+            return _Outcome(changed=True)
+        case ChatUpdated():
+            repo.upsert_chat(conn, p.jid, kind=p.kind, title=p.title)
+            return _Outcome(changed=True)
+        case Presence():
+            return _Outcome(changed=True)  # efímera: no se persiste
+        case _:
+            return _Outcome()

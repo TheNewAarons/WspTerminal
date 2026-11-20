@@ -61,11 +61,14 @@ def _create_private(target: Path) -> None:
     os.close(fd)
 
 
-def open_write(path: Path | None = None) -> sqlite3.Connection:
-    """Única conexión de escritura (daemon). Modo autocommit; usar `transaction`."""
+def open_write(path: Path | None = None, *, check_same_thread: bool = True) -> sqlite3.Connection:
+    """Única conexión de escritura (daemon). Modo autocommit; usar `transaction`.
+
+    `check_same_thread=False` solo para tests que usan la conexión desde el hilo del `Writer`.
+    """
     target = _resolve(path)
     _create_private(target)
-    conn = sqlite3.connect(target, isolation_level=None)
+    conn = sqlite3.connect(target, isolation_level=None, check_same_thread=check_same_thread)
     try:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout = 5000")

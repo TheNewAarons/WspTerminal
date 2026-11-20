@@ -33,6 +33,7 @@ from wsp.protocol.models import (
     Reaction,
 )
 from wsp.store import repo
+from wsp.store.writer import Writer
 
 
 def payloads(items: list[Any]) -> list[Any]:
@@ -267,8 +268,8 @@ def col(conn: sqlite3.Connection) -> Collector:
 
 
 @pytest.fixture
-def bridge(conn: sqlite3.Connection, col: Collector) -> Bridge:
-    return Bridge(conn, col)
+def bridge(writer: Writer, col: Collector) -> Bridge:
+    return Bridge(writer, col)
 
 
 async def test_persist_before_emit(bridge: Bridge, col: Collector) -> None:

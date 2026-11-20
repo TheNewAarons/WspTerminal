@@ -8,7 +8,7 @@ import signal
 import sqlite3
 import sys
 from collections.abc import Callable
-from typing import Final
+from typing import Any, Final
 
 from wsp import __version__, paths
 from wsp.daemon.config import Config, ConfigError, load_config
@@ -26,6 +26,7 @@ from wsp.daemon.session import (
 from wsp.protocol.models import Event
 from wsp.protocol.server import Server, sqlite_backfill
 from wsp.store import db, migrate, repo
+from wsp.store.writer import Writer
 
 log = logging.getLogger(__name__)
 
@@ -38,6 +39,7 @@ ClientFactory = Callable[[], WaClient]
 
 
 def _maintenance_once(conn: sqlite3.Connection, retention_days: int) -> None:
+    """Hilo del writer: purga + optimize + checkpoint + permisos."""
     result = repo.purge_older_than(conn, retention_days)
     repo.fts_optimize(conn)
     conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -52,13 +54,22 @@ def _maintenance_once(conn: sqlite3.Connection, retention_days: int) -> None:
     )
 
 
-async def _maintenance(conn: sqlite3.Connection, retention_days: int) -> None:
+async def _maintenance(writer: Writer, retention_days: int) -> None:
     while True:
         try:
-            _maintenance_once(conn, retention_days)
+            await writer.run(_maintenance_once, retention_days)
         except sqlite3.Error as e:
             log.error("mantenimiento falló exc=%s", type(e).__name__)
         await asyncio.sleep(MAINTENANCE_INTERVAL)
+
+
+async def _cancel(*tasks: asyncio.Task[Any] | None) -> None:
+    """Cancela y espera: ninguna tarea queda huérfana ni se destruye pendiente."""
+    live = [t for t in tasks if t is not None]
+    for t in live:
+        t.cancel()
+    if live:
+        await asyncio.gather(*live, return_exceptions=True)
 
 
 async def serve(
@@ -66,21 +77,26 @@ async def serve(
     client_factory: ClientFactory = NeonizeClient,
     stop: asyncio.Event | None = None,
 ) -> None:
-    """Levanta DB, socket, outbox y sesión; al recibir `stop` (o logged_out) cierra limpio."""
+    """Levanta DB, socket, outbox y sesión; al recibir `stop` (o logged_out) cierra limpio.
+
+    Apagado (orden): señales → mantenimiento → drenar outbox (sesión viva) → desconectar sesión →
+    socket (cancela handlers/escritores) → encolados en vuelo → cerrar el hilo del writer.
+    """
     stop = stop or asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in _STOP_SIGNALS:
         loop.add_signal_handler(sig, stop.set)
 
-    conn = db.open_write()
+    writer = await Writer.open(db.open_write)
     server: Server | None = None
     session_task: asyncio.Task[None] | None = None
     maint_task: asyncio.Task[None] | None = None
+    stopper: asyncio.Task[bool] | None = None
     outbox: Outbox | None = None
     session: Session | None = None
     try:
-        migrate.migrate(conn)
-        recovered = repo.outbox_recover(conn)
+        await writer.run(migrate.migrate)
+        recovered = await writer.run(repo.outbox_recover)
         if recovered:
             log.warning("outbox: envíos interrumpidos n=%d", recovered)
 
@@ -89,46 +105,43 @@ async def serve(
                 server.broadcast(event)
 
         client = client_factory()
-        bridge = Bridge(conn, emit)
+        bridge = Bridge(writer, emit)
         session = Session(client, cfg.reconnect, emit, bridge.handle)
-        outbox = Outbox(conn, client, cfg.outbox, emit)
-        server = Server(paths.socket_path(), Commands(conn, outbox), sqlite_backfill())
+        outbox = Outbox(writer, client, cfg.outbox, emit)
+        server = Server(paths.socket_path(), Commands(writer, outbox), sqlite_backfill())
         await server.start()
         outbox.start()
-        maint_task = asyncio.create_task(_maintenance(conn, cfg.retention_days))
+        maint_task = asyncio.create_task(
+            _maintenance(writer, cfg.retention_days), name="maintenance"
+        )
         session_task = asyncio.create_task(session.run(), name="session")
         log.info("wspd %s listo", __version__)
 
-        stopper = asyncio.create_task(stop.wait())
+        stopper = asyncio.create_task(stop.wait(), name="stop-wait")
         await asyncio.wait({stopper, session_task}, return_when=asyncio.FIRST_COMPLETED)
-        stopper.cancel()
         if session_task.done() and not stop.is_set():
             log.warning("sesión terminada state=%s", session.state)
     finally:
         log.info("apagando")
         for sig in _STOP_SIGNALS:
             loop.remove_signal_handler(sig)
-        if maint_task is not None:
-            maint_task.cancel()
-        # Drenar outbox con la sesión viva; luego desconectar y cerrar el socket.
-        if outbox is not None:
-            with contextlib.suppress(Exception):
-                await outbox.stop(SHUTDOWN_TIMEOUT)
-        if session is not None:
-            with contextlib.suppress(Exception):
-                await session.stop()
-        if session_task is not None:
-            session_task.cancel()
-        if server is not None:
-            with contextlib.suppress(Exception):
-                await server.stop()
-        for t in (maint_task, session_task):
-            if t is not None:
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await t
-        with contextlib.suppress(sqlite3.Error):
-            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        conn.close()
+        try:
+            await _cancel(stopper, maint_task)
+            # Drenar outbox con la sesión viva; luego desconectar y cerrar el socket.
+            if outbox is not None:
+                with contextlib.suppress(Exception):
+                    await outbox.stop(SHUTDOWN_TIMEOUT)
+            if session is not None:
+                with contextlib.suppress(Exception):
+                    await session.stop()
+            await _cancel(session_task)
+            if server is not None:
+                with contextlib.suppress(Exception):
+                    await server.stop()
+            if outbox is not None:
+                await outbox.join()
+        finally:
+            await writer.aclose()
 
 
 def main() -> int:
