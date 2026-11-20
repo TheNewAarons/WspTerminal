@@ -11,7 +11,7 @@ from typing import Final, TextIO
 from pydantic import ValidationError
 
 from wsp import paths
-from wsp.cli import commands, render
+from wsp.cli import commands, mentions, render
 from wsp.cli.render import Palette
 from wsp.cli.repl import (
     CONNECT_TIMEOUT,
@@ -25,6 +25,7 @@ from wsp.protocol.client import Client, ConnectionLost, RemoteError, RequestTime
 from wsp.protocol.models import (
     ChatUpdated,
     ListChats,
+    Members,
     MessageStatus,
     SendText,
     to_envelope,
@@ -94,6 +95,14 @@ async def _wait_delivered(client: Client, chat_jid: str, timeout: float) -> str 
     return "conexión cerrada"
 
 
+async def _members(client: Client, chat_jid: str) -> list[mentions.Member] | None:
+    try:
+        res = await client.request(Members(chat_jid=chat_jid))
+    except (RemoteError, RequestTimeout, ConnectionLost):
+        return None
+    return [(str(m["jid"]), m.get("name")) for m in res.get("members", [])]
+
+
 async def send(
     chat: str,
     text: str,
@@ -118,7 +127,13 @@ async def send(
             jid = _pick(chat, await _chats(client), err)
             if jid is None:
                 return EXIT_NO_CHAT
-            res = await client.request(SendText(chat_jid=jid, text=text))
+            prepared = await mentions.prepare(text, jid, lambda j: _members(client, j))
+            res = await client.request(
+                SendText(chat_jid=jid, text=prepared.text, mentions=prepared.mentions)
+            )
+        except mentions.MentionError as e:
+            _fail(err, str(e))
+            return EXIT_FAILED
         except RemoteError as e:
             _fail(err, remote_error_text(e))
             return EXIT_FAILED

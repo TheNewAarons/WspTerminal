@@ -25,6 +25,17 @@ def client_that(*events: str, qr: bytes | None = None) -> FakeClient:
     return c
 
 
+@pytest.fixture(autouse=True)
+def _no_settle(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(pair_mod, "SETTLE_SECONDS", 0.01)
+
+
+async def test_logout_during_settle_is_failure() -> None:
+    c = client_that("ConnectedEv", "LoggedOutEv")
+    assert await pair(c, io.StringIO(), wait_seconds=2, settle_seconds=0.5) is False
+    assert c.disconnects == 1
+
+
 def test_render_qr_draws_ascii() -> None:
     out = io.StringIO()
     render_qr(b"https://example.test/abc", out)

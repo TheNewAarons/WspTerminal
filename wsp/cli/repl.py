@@ -17,7 +17,7 @@ from prompt_toolkit.patch_stdout import patch_stdout
 from pydantic import BaseModel, ValidationError
 
 from wsp import paths
-from wsp.cli import commands, daemon_cmd, notify, render
+from wsp.cli import commands, daemon_cmd, media, mentions, notify, render
 from wsp.cli.completer import WspCompleter
 from wsp.cli.render import Palette
 from wsp.protocol.client import Client, ConnectionLost, RemoteError, RequestTimeout
@@ -31,6 +31,7 @@ from wsp.protocol.models import (
     History,
     ListChats,
     MarkRead,
+    Members,
     MessageDeleted,
     MessageEdited,
     MessageNew,
@@ -50,6 +51,8 @@ CONNECT_TIMEOUT: Final = 3.0
 ACCOUNT_WAIT: Final = 1.0
 MAX_LIST: Final = 200
 SEEN_MAX: Final = 4096
+STICKER_WAIT: Final = 15.0  # segundos que se espera la descarga de un sticker en vivo
+STICKER_POLL: Final = 0.25
 PROMPT_TITLE_MAX: Final = 24
 _UNLINKED: Final = frozenset({"pairing", "logged_out"})
 
@@ -86,17 +89,23 @@ class Repl:
         *,
         tz: tzinfo | None = None,
         notifier: Notifier | None = None,
+        images: bool = False,
     ) -> None:
         self._client = client
+        self._images = images  # stickers en línea (terminal con protocolo gráfico de Kitty)
         self._notifier = notifier
         self._tasks: set[asyncio.Task[object]] = set()
+        self._player: asyncio.subprocess.Process | None = None
         self._out = out
         self._pal = pal
         self._tz = tz
         self.chats: dict[str, ChatUpdated] = {}
         self.listing: list[str] = []  # jids de la última salida de /chats (índice = n - 1)
         self.open_jid: str | None = None
+        self.group_members: dict[str, list[mentions.Member]] = {}  # para autocompletar `@`
         self.view: list[MessageNew] = []  # mensajes numerados del chat abierto (n = índice + 1)
+        self.audios: list[MessageNew] = []  # `[audio #id]` de la sesión (id = índice + 1)
+        self._audio_ids: dict[tuple[str, str], int] = {}
         self.account: AccountState | None = None
         self.account_seen = asyncio.Event()
         self._msgs: OrderedDict[tuple[str, str], MessageNew] = OrderedDict()
@@ -116,7 +125,7 @@ class Repl:
         self._emit(self._pal.dim(f"  {text}"))
 
     def error(self, text: str) -> None:
-        self._emit(self._pal.paint(f"  ✗ {text}", 31))
+        self._emit(self._pal.paint(f"  ✗ {render.one_line(text)}", 31))
 
     # ---- nombres ------------------------------------------------------------------------
 
@@ -180,7 +189,7 @@ class Repl:
         known = (m.chat_jid, m.wa_id) in self._printed
         self._remember(m)
         if not known:
-            self._print_message(m)
+            self._print_message(m, wait=True)
         return not known
 
     def _maybe_notify(self, m: MessageNew) -> None:
@@ -207,12 +216,13 @@ class Repl:
 
     async def aclose(self) -> None:
         """Cancela y espera las notificaciones pendientes (al salir del REPL)."""
+        self._stop_player()
         pending = list(self._tasks)
         for t in pending:
             t.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
 
-    def _print_message(self, m: MessageNew) -> None:
+    def _print_message(self, m: MessageNew, *, wait: bool = False) -> None:
         key = (m.chat_jid, m.wa_id)
         self._printed.add(key)
         lines: list[str] = []
@@ -231,8 +241,38 @@ class Repl:
             quoted=quoted,
             tz=self._tz,
             num=self._number(m),
+            audio_id=self._audio_id(m),
         )
         self._emit(*lines)
+        if self._images and m.kind == "sticker" and m.deleted_at is None:
+            self._show_sticker(m, wait)
+
+    def _audio_id(self, m: MessageNew) -> int | None:
+        """Id estable de sesión para `/oir` (se asigna al ver el audio por 1.ª vez)."""
+        if m.kind != "audio" or m.deleted_at is not None:
+            return None
+        key = (m.chat_jid, m.wa_id)
+        if key not in self._audio_ids:
+            self.audios.append(m)
+            self._audio_ids[key] = len(self.audios)
+        return self._audio_ids[key]
+
+    def _show_sticker(self, m: MessageNew, wait: bool) -> None:
+        path = paths.find_media(m.wa_id)
+        if path is not None:
+            self._emit(media.kitty_image(path.read_bytes()))
+        elif wait:  # en vivo: el daemon aún lo está descargando
+            self._spawn(self._await_sticker(m))
+
+    async def _await_sticker(self, m: MessageNew) -> None:
+        for _ in range(int(STICKER_WAIT / STICKER_POLL)):
+            await asyncio.sleep(STICKER_POLL)
+            if (path := paths.find_media(m.wa_id)) is not None:
+                who = render.author_name(m, self.name_of)
+                self._emit(
+                    self._pal.dim(f"  ↳ sticker de {who}"), media.kitty_image(path.read_bytes())
+                )
+                return
 
     def _number(self, m: MessageNew) -> int | None:
         """Número del mensaje en la vista del chat abierto (se asigna al verlo por 1.ª vez)."""
@@ -314,6 +354,8 @@ class Repl:
                 await self._cmd_reply(cmd)
             case commands.ReactTo():
                 await self._cmd_react(cmd)
+            case commands.PlayAudio():
+                await self._cmd_audio(cmd.audio_id)
             case commands.SearchFor():
                 await self._cmd_search(cmd.query)
             case commands.MuteChat():
@@ -342,7 +384,42 @@ class Repl:
         if self.open_jid is None:
             self._emit(*render.HELP_NO_CHAT)
             return
-        self._report_send(await self._call(SendText(chat_jid=self.open_jid, text=text)))
+        prepared = await self._prepare(text, self.open_jid)
+        if prepared is not None:
+            self._report_send(
+                await self._call(
+                    SendText(chat_jid=self.open_jid, text=prepared.text, mentions=prepared.mentions)
+                )
+            )
+
+    def _prefetch_members(self, jid: str) -> None:
+        """Carga los miembros del grupo en segundo plano (sin ruido si falla)."""
+        if not jid.endswith(mentions.GROUP_SUFFIX):
+            return
+        task = asyncio.ensure_future(self._load_members(jid))
+        self._tasks.add(task)
+        task.add_done_callback(self._task_done)
+
+    async def _load_members(self, jid: str) -> None:
+        try:
+            res = await self._client.request(Members(chat_jid=jid))
+            self.group_members[jid] = [(str(m["jid"]), m.get("name")) for m in res["members"]]
+        except (RemoteError, ConnectionLost, RequestTimeout, KeyError, TypeError, AttributeError):
+            return
+
+    async def _members(self, chat_jid: str) -> list[mentions.Member] | None:
+        res = await self._call(Members(chat_jid=chat_jid))
+        if res is None:
+            return None
+        return [(str(m["jid"]), m.get("name")) for m in res.get("members", [])]
+
+    async def _prepare(self, text: str, chat_jid: str) -> mentions.Prepared | None:
+        """Resuelve menciones; imprime el error y devuelve None si no se puede enviar."""
+        try:
+            return await mentions.prepare(text, chat_jid, self._members)
+        except mentions.MentionError as e:
+            self.error(str(e))
+            return None
 
     def _target(self, n: int) -> MessageNew | None:
         """Mensaje número `n` de la vista actual; avisa si no hay chat o n está fuera de rango."""
@@ -356,10 +433,18 @@ class Repl:
 
     async def _cmd_reply(self, cmd: commands.Reply) -> None:
         target = self._target(cmd.n)
-        if target is not None:
+        if target is None:
+            return
+        prepared = await self._prepare(cmd.text, target.chat_jid)
+        if prepared is not None:
             self._report_send(
                 await self._call(
-                    SendReply(chat_jid=target.chat_jid, quoted_wa_id=target.wa_id, text=cmd.text)
+                    SendReply(
+                        chat_jid=target.chat_jid,
+                        quoted_wa_id=target.wa_id,
+                        text=prepared.text,
+                        mentions=prepared.mentions,
+                    )
                 )
             )
 
@@ -367,6 +452,36 @@ class Repl:
         target = self._target(cmd.n)
         if target is not None:
             await self._call(React(chat_jid=target.chat_jid, wa_id=target.wa_id, emoji=cmd.emoji))
+
+    async def _cmd_audio(self, audio_id: int) -> None:
+        if not 1 <= audio_id <= len(self.audios):
+            self.error(
+                f"no hay audio #{audio_id}" + (f" (1-{len(self.audios)})" if self.audios else "")
+            )
+            return
+        path = paths.find_media(self.audios[audio_id - 1].wa_id)
+        if path is None:
+            self.error(
+                "audio no descargado (solo se guardan los recibidos con el daemon en marcha)"
+            )
+            return
+        self._stop_player()
+        try:
+            self._player = await media.play(path)
+        except OSError as e:
+            self.error(f"no se pudo reproducir con afplay ({type(e).__name__})")
+            return
+        self.note(f"▶ reproduciendo audio #{audio_id}")
+
+    def _spawn(self, coro: Awaitable[object]) -> None:
+        task = asyncio.ensure_future(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._task_done)
+
+    def _stop_player(self) -> None:
+        if self._player is not None and self._player.returncode is None:
+            self._player.terminate()
+        self._player = None
 
     async def _load_chats(self, limit: int) -> list[ChatUpdated]:
         res = await self._call(ListChats(limit=limit))
@@ -421,6 +536,7 @@ class Repl:
         if jid is None:
             return
         self.open_jid = jid
+        self._prefetch_members(jid)
         await self._show_history(jid, commands.DEFAULT_HISTORY)
         await self._call(MarkRead(chat_jid=jid))
 
@@ -566,7 +682,14 @@ async def run(
             return EXIT_UNREACHABLE
         if notifier is None and notifications:
             notifier = notify.notify
-        repl = Repl(client, out, pal, tz=tz, notifier=notifier if notifications else None)
+        repl = Repl(
+            client,
+            out,
+            pal,
+            tz=tz,
+            notifier=notifier if notifications else None,
+            images=media.kitty_supported() and (out or sys.stdout).isatty(),
+        )
         pump = asyncio.create_task(_pump(client, repl), name="wsp-pump")
         try:
             with contextlib.suppress(TimeoutError):
@@ -579,9 +702,10 @@ async def run(
                 session = PromptSession(
                     history=_history_file(),
                     completer=WspCompleter(
-                        lambda: [c.title for c in repl.chats.values() if c.title]
+                        lambda: [c.title for c in repl.chats.values() if c.title],
+                        lambda: repl.group_members.get(repl.open_jid or "", []),
                     ),
-                    complete_while_typing=False,
+                    complete_while_typing=True,
                 )
             with patch_stdout(raw=True):
                 repl.note("conectado. /help para ver comandos.")

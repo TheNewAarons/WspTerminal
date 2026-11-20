@@ -24,6 +24,11 @@ RequestId = Annotated[
 Text = Annotated[str, StringConstraints(min_length=1, max_length=MAX_TEXT)]
 Ts = Annotated[int, Field(ge=0, le=2**63 - 1)]
 Limit = Annotated[int, Field(ge=1, le=MAX_LIMIT)]
+MAX_MENTIONS: Final = 50
+MentionJid = Annotated[
+    str, StringConstraints(max_length=128, pattern=r"^[0-9A-Za-z._-]{1,64}@(s\.whatsapp\.net|lid)$")
+]
+Mentions = Annotated[list[MentionJid], Field(max_length=MAX_MENTIONS)]
 
 Status = Literal["pending", "sent", "delivered", "read", "failed"]
 ChatKind = Literal["direct", "group", "broadcast"]
@@ -179,6 +184,7 @@ class SendText(Payload):
     TYPE: ClassVar[str] = "send_text"
     chat_jid: Jid
     text: Text
+    mentions: Mentions = Field(default_factory=list)  # cada `@<user>` debe estar en `text`
 
 
 class SendReply(Payload):
@@ -186,6 +192,12 @@ class SendReply(Payload):
     chat_jid: Jid
     quoted_wa_id: WaId
     text: Text
+    mentions: Mentions = Field(default_factory=list)
+
+
+class Members(Payload):
+    TYPE: ClassVar[str] = "members"
+    chat_jid: Jid
 
 
 class React(Payload):
@@ -227,7 +239,9 @@ class Ping(Payload):
     TYPE: ClassVar[str] = "ping"
 
 
-HandledCommand = SendText | SendReply | React | MarkRead | ListChats | History | Search | Mute
+HandledCommand = (
+    SendText | SendReply | React | MarkRead | ListChats | History | Search | Mute | Members
+)
 Command = Hello | Ping | HandledCommand
 
 EVENT_CLASSES: Final[tuple[type[Event], ...]] = (
@@ -254,6 +268,7 @@ COMMAND_CLASSES: Final[tuple[type[Command], ...]] = (
     History,
     Search,
     Mute,
+    Members,
 )
 _EVENTS: Final[dict[str, type[Event]]] = {c.TYPE: c for c in EVENT_CLASSES}
 _COMMANDS: Final[dict[str, type[Command]]] = {c.TYPE: c for c in COMMAND_CLASSES}

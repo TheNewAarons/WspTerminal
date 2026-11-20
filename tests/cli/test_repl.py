@@ -13,6 +13,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.input import PipeInput, create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
+from wsp import paths
 from wsp.cli import repl
 from wsp.cli.render import Palette
 from wsp.cli.repl import Repl, run, run_loop
@@ -26,8 +27,10 @@ from wsp.protocol.models import (
     History,
     ListChats,
     MarkRead,
+    Members,
     MessageNew,
     MessageStatus,
+    SendReply,
     SendText,
 )
 from wsp.protocol.server import CommandError, Server
@@ -59,6 +62,8 @@ class FakeDaemon:
     def __init__(self) -> None:
         self.cmds: list[HandledCommand] = []
         self.send_error: CommandError | None = None
+        self.members: list[dict[str, Any]] = []
+        self.members_error: CommandError | None = None
         self.chats = [chat(JUAN, "Juan", unread=2), chat(FAMILIA, "Familia", "group")]
         self.history = [msg("h1", body="antes"), msg("h2", body="hola", sender_jid=None)]
 
@@ -69,6 +74,12 @@ class FakeDaemon:
                 return {"chats": [c.model_dump(mode="json") for c in self.chats]}
             case History():
                 return {"messages": [m.model_dump(mode="json") for m in self.history]}
+            case Members():
+                if self.members_error is not None:
+                    raise self.members_error
+                return {"members": self.members}
+            case SendReply():
+                return {"state": "pending", "wa_id": "local-" + rid}
             case SendText():
                 if self.send_error is not None:
                     raise self.send_error
@@ -262,6 +273,62 @@ async def test_edit_delete_and_quote_render() -> None:
     assert "[14:02] 111 › (mensaje eliminado)" in text
 
 
+async def test_audio_ids_and_oir(wsp_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from wsp.cli import media
+
+    played: list[Path] = []
+
+    async def fake_play(path: Path) -> Any:
+        played.append(path)
+        return None
+
+    monkeypatch.setattr(media, "play", fake_play)
+    out = io.StringIO()
+    r = Repl(None, out, Palette(False), tz=UTC)  # type: ignore[arg-type]
+    r.handle(msg("AU1", kind="audio"))
+    r.handle(msg("AU2", kind="audio"))
+    r.handle(msg("AU1", kind="audio"))  # repetido: conserva su id
+    assert "111 › [audio #1]" in out.getvalue()
+    assert "111 › [audio #2]" in out.getvalue()
+    await r.handle_line("/oir 2")
+    assert "no descargado" in out.getvalue()
+    paths.media_dir().mkdir()
+    paths.media_file("AU2", "ogg").write_bytes(b"x")
+    await r.handle_line("/oir #2")
+    assert played == [paths.media_file("AU2", "ogg")]
+    await r.handle_line("/oir 9")
+    assert "no hay audio #9 (1-2)" in out.getvalue()
+
+
+async def test_sticker_shown_inline_when_downloaded(
+    wsp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(repl, "STICKER_POLL", 0.01)
+    out = io.StringIO()
+    r = Repl(None, out, Palette(False), tz=UTC, images=True)  # type: ignore[arg-type]
+    paths.media_dir().mkdir()
+    paths.media_file("ST1", "png").write_bytes(b"PNG1")
+    r.handle(msg("ST1", kind="sticker"))
+    assert "111 › [sticker]\n\x1b_Ga=T,f=100,m=0;UE5HMQ==\x1b\\" in out.getvalue()
+    r.handle(msg("ST2", kind="sticker"))  # en vivo: aparece cuando el daemon lo guarda
+    paths.media_file("ST2", "png").write_bytes(b"PNG2")
+    for _ in range(50):
+        await asyncio.sleep(0.01)
+        if "UE5HMg==" in out.getvalue():
+            break
+    assert "↳ sticker de 111\n\x1b_Ga=T,f=100,m=0;UE5HMg==" in out.getvalue()
+    await r.aclose()
+
+
+async def test_sticker_not_drawn_without_images(wsp_home: Path) -> None:
+    out = io.StringIO()
+    r = Repl(None, out, Palette(False), tz=UTC)  # type: ignore[arg-type]
+    paths.media_dir().mkdir()
+    paths.media_file("ST1", "png").write_bytes(b"PNG1")
+    r.handle(msg("ST1", kind="sticker"))
+    assert "\x1b_G" not in out.getvalue()
+
+
 async def test_account_state_notices() -> None:
     out = io.StringIO()
     r = Repl(None, out, Palette(False))  # type: ignore[arg-type]
@@ -374,3 +441,68 @@ async def test_malformed_reply_is_reported(
     r = Repl(client, out, Palette(False))
     await r.handle_line("/chats")
     assert "Traceback" not in out.getvalue()
+
+
+# ---- menciones -------------------------------------------------------------------------------
+
+
+async def test_group_text_resolves_mentions(
+    client: Client, out: io.StringIO, daemon: FakeDaemon
+) -> None:
+    daemon.members = [{"jid": "5215500000009@s.whatsapp.net", "name": "Pepe"}]
+    r = Repl(client, out, Palette(False), tz=UTC)
+    await r.handle_line("/chats")
+    await r.handle_line("/open 2")
+    await r.handle_line("hola @pepe")
+    [c] = [c for c in daemon.cmds if isinstance(c, SendText)]
+    assert c.text == "hola @5215500000009" and c.mentions == ["5215500000009@s.whatsapp.net"]
+
+
+async def test_group_ambiguous_mention_prints_error_and_does_not_send(
+    client: Client, out: io.StringIO, daemon: FakeDaemon
+) -> None:
+    daemon.members = [
+        {"jid": "1@s.whatsapp.net", "name": "Pepe A"},
+        {"jid": "2@s.whatsapp.net", "name": "Pepe B"},
+    ]
+    r = Repl(client, out, Palette(False), tz=UTC)
+    await r.handle_line("/chats")
+    await r.handle_line("/open 2")
+    await r.handle_line("hola @pepe")
+    assert "ambiguo" in out.getvalue()
+    assert not any(isinstance(c, SendText) for c in daemon.cmds)
+
+
+async def test_members_failure_prints_error_and_does_not_send(
+    client: Client, out: io.StringIO, daemon: FakeDaemon
+) -> None:
+    daemon.members_error = CommandError("internal", "x")
+    r = Repl(client, out, Palette(False), tz=UTC)
+    await r.handle_line("/chats")
+    await r.handle_line("/open 2")
+    await r.handle_line("hola @pepe")
+    assert "miembros" in out.getvalue()
+    assert not any(isinstance(c, SendText) for c in daemon.cmds)
+
+
+async def test_reply_in_group_resolves_mentions(
+    client: Client, out: io.StringIO, daemon: FakeDaemon
+) -> None:
+    daemon.members = [{"jid": "5215500000009@s.whatsapp.net", "name": "Pepe"}]
+    daemon.history = [msg("h1", chat_jid=FAMILIA, body="antes")]
+    r = Repl(client, out, Palette(False), tz=UTC)
+    await r.handle_line("/chats")
+    await r.handle_line("/open 2")
+    await r.handle_line("/r 1 ok @pepe")
+    [c] = [c for c in daemon.cmds if isinstance(c, SendReply)]
+    assert c.text == "ok @5215500000009" and c.mentions == ["5215500000009@s.whatsapp.net"]
+
+
+async def test_direct_text_has_no_members_query(
+    client: Client, out: io.StringIO, daemon: FakeDaemon
+) -> None:
+    r = Repl(client, out, Palette(False), tz=UTC)
+    await r.handle_line("/chats")
+    await r.handle_line("/open 1")
+    await r.handle_line("mail a@b.com y @x")
+    assert not any(isinstance(c, Members) for c in daemon.cmds)

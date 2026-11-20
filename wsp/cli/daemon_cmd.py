@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from typing import Final, TextIO
 
@@ -21,6 +22,8 @@ EXIT_NOT_LOADED: Final = 1
 EXIT_UNREACHABLE: Final = 2
 EXIT_ACCOUNT: Final = 3
 PING_TIMEOUT: Final = 3.0
+BOOTSTRAP_RETRIES: Final = 20
+BOOTSTRAP_DELAY: Final = 0.5
 _ETIME_RE: Final = re.compile(r"^(?:(?:(\d+)-)?(\d+):)?(\d+):(\d+)$")
 
 PsRunner = Callable[[int], str]
@@ -34,7 +37,11 @@ def _detail(r: "subprocess.CompletedProcess[str]") -> str:
     return (r.stderr or r.stdout or f"código {r.returncode}").strip()
 
 
-def install(run: Runner = launchd.run_launchctl, out: TextIO = sys.stdout) -> int:
+def install(
+    run: Runner = launchd.run_launchctl,
+    out: TextIO = sys.stdout,
+    sleep: Callable[[float], None] = time.sleep,
+) -> int:
     try:
         wspd = launchd.resolve_wspd()
     except WspdNotFoundError as e:
@@ -47,7 +54,12 @@ def install(run: Runner = launchd.run_launchctl, out: TextIO = sys.stdout) -> in
         return EXIT_ERROR
     if launchd.inspect_service(run).loaded:  # idempotente: reemplaza la carga previa
         launchd.bootout(run)
-    r = launchd.bootstrap(plist, run)
+    # bootout es asíncrono: mientras launchd termina de descargar, bootstrap falla con EIO (5).
+    for _ in range(BOOTSTRAP_RETRIES):
+        r = launchd.bootstrap(plist, run)
+        if r.returncode == 0:
+            break
+        sleep(BOOTSTRAP_DELAY)
     if r.returncode != 0:
         _err(f"wsp: launchctl bootstrap falló: {_detail(r)}")
         return EXIT_ERROR

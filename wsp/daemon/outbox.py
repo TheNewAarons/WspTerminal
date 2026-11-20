@@ -8,6 +8,7 @@ Los errores se publican como códigos estables, nunca como texto libre.
 
 import asyncio
 import logging
+import re
 import sqlite3
 import time
 from collections.abc import Awaitable, Callable, Mapping
@@ -16,13 +17,14 @@ from typing import Any, Final
 from pydantic import ValidationError
 
 from wsp.daemon.config import OutboxConfig
-from wsp.daemon.session import WaClient
+from wsp.daemon.session import GroupMember, WaClient
 from wsp.protocol.models import (
     Event,
     HandledCommand,
     History,
     ListChats,
     MarkRead,
+    Members,
     MessageNew,
     MessageStatus,
     Mute,
@@ -38,6 +40,7 @@ from wsp.store.writer import Writer
 
 log = logging.getLogger(__name__)
 
+MEMBERS_TTL: Final = 30.0  # s; caché de miembros para no golpear la red en cada /members
 PLACEHOLDER_PREFIX: Final = "wsp:"
 ERR_SEND_FAILED: Final = "send_failed"
 ERR_TIMEOUT: Final = "send_timeout"
@@ -257,7 +260,11 @@ class Outbox:
         match p.get("kind"):
             case "text" | "reply":
                 return await self._client.send_text(
-                    item.chat_jid, p["text"], p.get("quoted_wa_id"), p.get("quoted_sender")
+                    item.chat_jid,
+                    p["text"],
+                    p.get("quoted_wa_id"),
+                    p.get("quoted_sender"),
+                    p.get("mentions") or None,
                 )
             case "react":
                 return await self._client.send_reaction(
@@ -327,9 +334,16 @@ class Outbox:
 class Commands:
     """`Handler` del `Server`: despacha comandos al outbox o al store (SQLite en el hilo writer)."""
 
-    def __init__(self, writer: Writer, outbox: Outbox) -> None:
+    def __init__(
+        self,
+        writer: Writer,
+        outbox: Outbox,
+        members: Callable[[str], Awaitable[list[GroupMember]]] | None = None,
+    ) -> None:
         self._writer = writer
         self._outbox = outbox
+        self._members = members
+        self._members_cache: dict[str, tuple[float, list[GroupMember]]] = {}
 
     async def __call__(self, request_id: str, cmd: HandledCommand) -> Mapping[str, Any]:
         try:
@@ -340,13 +354,42 @@ class Commands:
             log.error("comando falló exc=%s", type(e).__name__)
             raise CommandError("internal", "error de almacenamiento") from None
 
+    async def _members_of(self, chat_jid: str) -> Mapping[str, Any]:
+        if self._members is None or not chat_jid.endswith("@g.us"):
+            raise CommandError("not_found", "no es un grupo")
+        hit = self._members_cache.get(chat_jid)
+        if hit is not None and time.monotonic() - hit[0] < MEMBERS_TTL:
+            found = hit[1]
+        else:
+            try:
+                found = await self._members(chat_jid)
+            except Exception as e:  # sin contenido: solo el tipo
+                log.warning("members falló exc=%s", type(e).__name__)
+                raise CommandError("internal", "no se pudo leer el grupo") from None
+            self._members_cache[chat_jid] = (time.monotonic(), found)
+        # En grupos @lid el contacto guardado está bajo el JID de teléfono, no bajo el lid.
+        wanted = list({j for m in found for j in (m[0], m[2]) if j})
+        names = await self._writer.run(repo.names_for, wanted)
+        return {
+            "members": [
+                {"jid": j, "name": n or names.get(j) or (names.get(pn) if pn else None)}
+                for j, n, pn in found
+            ]
+        }
+
     async def _dispatch(self, rid: str, cmd: HandledCommand) -> Mapping[str, Any]:
+        payload: dict[str, Any]
         match cmd:
             case SendText():
-                return await self._outbox.enqueue(
-                    rid, {"kind": "text", "text": cmd.text}, cmd.chat_jid
-                )
+                _check_mentions(cmd.text, cmd.mentions)
+                payload = {"kind": "text", "text": cmd.text}
+                if cmd.mentions:
+                    payload["mentions"] = cmd.mentions
+                return await self._outbox.enqueue(rid, payload, cmd.chat_jid)
+            case Members():
+                return await self._members_of(cmd.chat_jid)
             case SendReply():
+                _check_mentions(cmd.text, cmd.mentions)
                 author = await self._writer.run(repo.message_sender, cmd.chat_jid, cmd.quoted_wa_id)
                 payload = {
                     "kind": "reply",
@@ -354,6 +397,8 @@ class Commands:
                     "quoted_wa_id": cmd.quoted_wa_id,
                     "quoted_sender": None if author is None else author[0],
                 }
+                if cmd.mentions:
+                    payload["mentions"] = cmd.mentions
                 return await self._outbox.enqueue(rid, payload, cmd.chat_jid)
             case React():
                 author = await self._writer.run(repo.message_sender, cmd.chat_jid, cmd.wa_id)
@@ -368,6 +413,14 @@ class Commands:
                 return await self._outbox.enqueue(rid, payload, cmd.chat_jid)
             case _:
                 return await self._writer.run(_store_command, cmd)
+
+
+def _check_mentions(text: str, mentions: list[str]) -> None:
+    """Cada mención debe aparecer en el texto como `@<user>` (si no, el destinatario no la ve)."""
+    for jid in mentions:
+        user = jid.split("@", 1)[0]
+        if not user or not re.search(rf"(?<![\w@])@{re.escape(user)}(?!\w)", text):
+            raise CommandError("bad_payload", "mención sin su @ en el texto")
 
 
 def _store_command(conn: sqlite3.Connection, cmd: HandledCommand) -> Mapping[str, Any]:

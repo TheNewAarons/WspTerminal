@@ -5,7 +5,8 @@ from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
 from typing import Any
 
-from wsp.daemon.session import EventSink, QrHandler, SendResult
+from wsp.daemon.names import NameEntry
+from wsp.daemon.session import EventSink, GroupMember, QrHandler, SendResult
 
 ns = SimpleNamespace
 
@@ -78,10 +79,14 @@ class FakeClient:
         self.connect_script: list[BaseException | None] = []
         self.after_connect: Callable[[FakeClient], Awaitable[None]] | None = None
         self.send_errors: list[BaseException] = []
+        self.names: list[NameEntry] = []
+        self.members: dict[str, list[GroupMember]] = {}
+        self.mentions_sent: list[list[str] | None] = []
         self.phone_code = "ABCD-1234"
         self.phones: list[str] = []
         self.disconnect_error: BaseException | None = None
         self.closed: asyncio.Future[None] | None = None
+        self.media = b"MEDIA"
         self._n = 0
 
     def bind(self, on_event: EventSink, on_qr: QrHandler) -> None:
@@ -116,13 +121,22 @@ class FakeClient:
         await self.on_event(kind, ev)
 
     async def send_text(
-        self, jid: str, text: str, quoted_wa_id: str | None = None, quoted_sender: str | None = None
+        self,
+        jid: str,
+        text: str,
+        quoted_wa_id: str | None = None,
+        quoted_sender: str | None = None,
+        mentions: list[str] | None = None,
     ) -> SendResult:
         self.sent.append((jid, text, quoted_wa_id, quoted_sender))
+        self.mentions_sent.append(mentions)
         if self.send_errors:
             raise self.send_errors.pop(0)
         self._n += 1
         return SendResult(wa_id=f"WA{self._n}", ts=1_700_000_000)
+
+    async def download_media(self, message: Any) -> bytes:
+        return self.media
 
     async def send_reaction(
         self, chat_jid: str, wa_id: str, author_jid: str | None, emoji: str
@@ -132,6 +146,12 @@ class FakeClient:
             raise self.send_errors.pop(0)
         self._n += 1
         return SendResult(wa_id=f"WA{self._n}", ts=1_700_000_000)
+
+    async def group_members(self, chat_jid: str) -> list[GroupMember]:
+        return list(self.members.get(chat_jid, []))
+
+    async def fetch_names(self) -> list[NameEntry]:
+        return list(self.names)
 
     async def pair_phone(self, phone: str) -> str:
         self.phones.append(phone)

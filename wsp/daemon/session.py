@@ -17,6 +17,7 @@ from typing import Any, Final, Protocol
 
 from wsp import paths
 from wsp.daemon.config import ReconnectConfig
+from wsp.daemon.names import NameEntry
 from wsp.daemon.ts import norm_ts
 from wsp.protocol.models import AccountState
 
@@ -24,6 +25,8 @@ log = logging.getLogger(__name__)
 
 EXIT_ALREADY_RUNNING: Final = 2
 LOCK_NAME: Final = "wspd.lock"
+PAIR_PHONE_RETRIES: Final = 20
+PAIR_PHONE_DELAY: Final = 0.5
 _SESSION_SUFFIXES: Final = ("", "-wal", "-shm", "-journal")
 _STATE_LABELS: Final = ("pairing", "connected", "disconnected", "logged_out")
 
@@ -77,6 +80,9 @@ class SendResult:
     ts: int
 
 
+GroupMember = tuple[str, str | None, str | None]  # (jid, nombre en el grupo, jid de teléfono)
+
+
 class WaClient(Protocol):
     """Lo mínimo que el daemon necesita de WhatsApp."""
 
@@ -87,12 +93,25 @@ class WaClient(Protocol):
 
     async def disconnect(self) -> None: ...
     async def send_text(
-        self, jid: str, text: str, quoted_wa_id: str | None = None, quoted_sender: str | None = None
+        self,
+        jid: str,
+        text: str,
+        quoted_wa_id: str | None = None,
+        quoted_sender: str | None = None,
+        mentions: list[str] | None = None,
     ) -> SendResult: ...
+    async def group_members(self, chat_jid: str) -> list[GroupMember]:
+        """Participantes del grupo como (jid, nombre visible si lo hay)."""
+
     async def send_reaction(
         self, chat_jid: str, wa_id: str, author_jid: str | None, emoji: str
     ) -> SendResult: ...
     async def pair_phone(self, phone: str) -> str: ...
+    async def fetch_names(self) -> list[NameEntry]:
+        """Nombres de contactos guardados y de grupos."""
+
+    async def download_media(self, message: Any) -> bytes:
+        """Bytes descifrados del medio de un mensaje (protobuf `Message`)."""
 
 
 def secure_session_files(path: Path | None = None) -> None:
@@ -152,8 +171,10 @@ class Session:
         rand: Callable[[], float] = random.random,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         session_file: Path | None = None,
+        on_connected: Callable[[], None] | None = None,
     ) -> None:
         self._client = client
+        self._on_connected = on_connected
         self._emit_state = emit_state
         self._sink = sink
         self._sleep = sleep
@@ -189,6 +210,8 @@ class Session:
             if kind == "ConnectedEv":
                 self._backoff.reset()
                 self.set_state("connected")
+                if self._on_connected is not None:
+                    self._on_connected()
             elif kind == "DisconnectedEv":
                 self.set_state("disconnected", "closed")
             elif kind == "LoggedOutEv":
@@ -315,10 +338,15 @@ class NeonizeClient:
         return build_jid(user, server)
 
     async def send_text(
-        self, jid: str, text: str, quoted_wa_id: str | None = None, quoted_sender: str | None = None
+        self,
+        jid: str,
+        text: str,
+        quoted_wa_id: str | None = None,
+        quoted_sender: str | None = None,
+        mentions: list[str] | None = None,
     ) -> SendResult:
         target = self._jid(jid)
-        if quoted_wa_id is None:
+        if quoted_wa_id is None and not mentions:
             resp = await self._c.send_message(target, text)
         else:
             from neonize.proto.waE2E.WAWebProtobufsE2E_pb2 import (
@@ -327,10 +355,24 @@ class NeonizeClient:
                 Message,
             )
 
-            ctx = ContextInfo(stanzaID=quoted_wa_id, participant=quoted_sender or "")
+            ctx = ContextInfo(mentionedJID=mentions or [])
+            if quoted_wa_id is not None:
+                ctx.stanzaID = quoted_wa_id
+                ctx.participant = quoted_sender or ""
             msg = Message(extendedTextMessage=ExtendedTextMessage(text=text, contextInfo=ctx))
             resp = await self._c.send_message(target, msg)
         return SendResult(wa_id=str(resp.ID), ts=norm_ts(resp.Timestamp))
+
+    async def group_members(self, chat_jid: str) -> list[GroupMember]:
+        from wsp.daemon.events import jid_str
+
+        info = await self._c.get_group_info(self._jid(chat_jid))
+        out: list[GroupMember] = []
+        for p in info.Participants:
+            jid = jid_str(p.JID)
+            if jid:
+                out.append((jid, str(p.DisplayName) or None, jid_str(p.PhoneNumber)))
+        return out
 
     async def send_reaction(
         self, chat_jid: str, wa_id: str, author_jid: str | None, emoji: str
@@ -342,4 +384,30 @@ class NeonizeClient:
         return SendResult(wa_id=str(resp.ID), ts=norm_ts(resp.Timestamp))
 
     async def pair_phone(self, phone: str) -> str:
-        return str(await self._c.PairPhone(phone, True))
+        # connect() devuelve antes de que el cliente nativo exista: reintentar mientras sea nil.
+        for attempt in range(PAIR_PHONE_RETRIES):
+            try:
+                return str(await self._c.PairPhone(phone, True))
+            except Exception as e:
+                if "client is nil" not in str(e) or attempt == PAIR_PHONE_RETRIES - 1:
+                    raise
+                await asyncio.sleep(PAIR_PHONE_DELAY)
+        raise AssertionError("inalcanzable")
+
+    async def fetch_names(self) -> list[NameEntry]:
+        from wsp.daemon.events import jid_str
+
+        out: list[NameEntry] = []
+        for c in await self._c.contact.get_all_contacts():
+            jid, info = jid_str(c.JID), c.Info
+            name = info.FullName or info.PushName or info.BusinessName or info.FirstName
+            if jid and name:
+                out.append(NameEntry(jid, str(name)))
+        for g in await self._c.get_joined_groups():
+            jid, name = jid_str(g.JID), str(getattr(g.GroupName, "Name", "") or "")
+            if jid and name:
+                out.append(NameEntry(jid, name))
+        return out
+
+    async def download_media(self, message: Any) -> bytes:
+        return bytes(await self._c.download_any(message))
