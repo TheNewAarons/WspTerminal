@@ -86,6 +86,7 @@ class FakeClient:
         self.phones: list[str] = []
         self.disconnect_error: BaseException | None = None
         self.closed: asyncio.Future[None] | None = None
+        self.media = b"MEDIA"
         self._n = 0
 
     def bind(self, on_event: EventSink, on_qr: QrHandler) -> None:
@@ -133,6 +134,9 @@ class FakeClient:
             raise self.send_errors.pop(0)
         self._n += 1
         return SendResult(wa_id=f"WA{self._n}", ts=1_700_000_000)
+
+    async def download_media(self, message: Any) -> bytes:
+        return self.media
 
     async def send_reaction(
         self, chat_jid: str, wa_id: str, author_jid: str | None, emoji: str

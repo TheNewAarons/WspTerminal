@@ -13,6 +13,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.input import PipeInput, create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
+from wsp import paths
 from wsp.cli import repl
 from wsp.cli.render import Palette
 from wsp.cli.repl import Repl, run, run_loop
@@ -270,6 +271,62 @@ async def test_edit_delete_and_quote_render() -> None:
     assert "[14:02] tú › sí ✓" in text
     assert "[14:02] 111 › corregido (editado)" in text
     assert "[14:02] 111 › (mensaje eliminado)" in text
+
+
+async def test_audio_ids_and_oir(wsp_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from wsp.cli import media
+
+    played: list[Path] = []
+
+    async def fake_play(path: Path) -> Any:
+        played.append(path)
+        return None
+
+    monkeypatch.setattr(media, "play", fake_play)
+    out = io.StringIO()
+    r = Repl(None, out, Palette(False), tz=UTC)  # type: ignore[arg-type]
+    r.handle(msg("AU1", kind="audio"))
+    r.handle(msg("AU2", kind="audio"))
+    r.handle(msg("AU1", kind="audio"))  # repetido: conserva su id
+    assert "111 › [audio #1]" in out.getvalue()
+    assert "111 › [audio #2]" in out.getvalue()
+    await r.handle_line("/oir 2")
+    assert "no descargado" in out.getvalue()
+    paths.media_dir().mkdir()
+    paths.media_file("AU2", "ogg").write_bytes(b"x")
+    await r.handle_line("/oir #2")
+    assert played == [paths.media_file("AU2", "ogg")]
+    await r.handle_line("/oir 9")
+    assert "no hay audio #9 (1-2)" in out.getvalue()
+
+
+async def test_sticker_shown_inline_when_downloaded(
+    wsp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(repl, "STICKER_POLL", 0.01)
+    out = io.StringIO()
+    r = Repl(None, out, Palette(False), tz=UTC, images=True)  # type: ignore[arg-type]
+    paths.media_dir().mkdir()
+    paths.media_file("ST1", "png").write_bytes(b"PNG1")
+    r.handle(msg("ST1", kind="sticker"))
+    assert "111 › [sticker]\n\x1b_Ga=T,f=100,m=0;UE5HMQ==\x1b\\" in out.getvalue()
+    r.handle(msg("ST2", kind="sticker"))  # en vivo: aparece cuando el daemon lo guarda
+    paths.media_file("ST2", "png").write_bytes(b"PNG2")
+    for _ in range(50):
+        await asyncio.sleep(0.01)
+        if "UE5HMg==" in out.getvalue():
+            break
+    assert "↳ sticker de 111\n\x1b_Ga=T,f=100,m=0;UE5HMg==" in out.getvalue()
+    await r.aclose()
+
+
+async def test_sticker_not_drawn_without_images(wsp_home: Path) -> None:
+    out = io.StringIO()
+    r = Repl(None, out, Palette(False), tz=UTC)  # type: ignore[arg-type]
+    paths.media_dir().mkdir()
+    paths.media_file("ST1", "png").write_bytes(b"PNG1")
+    r.handle(msg("ST1", kind="sticker"))
+    assert "\x1b_G" not in out.getvalue()
 
 
 async def test_account_state_notices() -> None:

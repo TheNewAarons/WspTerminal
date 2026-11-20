@@ -52,8 +52,24 @@ def test_install_without_wspd(
 def test_install_bootstrap_failure(
     wsp_home: Path, have_wspd: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    assert daemon_cmd.install(FakeLaunchctl(fail={"bootstrap": 5}), io.StringIO()) == 1
+    sleeps: list[float] = []
+    fake = FakeLaunchctl(fail={"bootstrap": 5})
+    assert daemon_cmd.install(fake, io.StringIO(), sleeps.append) == 1
     assert "bootstrap falló" in capsys.readouterr().err
+    assert fake.verbs.count("bootstrap") == daemon_cmd.BOOTSTRAP_RETRIES
+
+
+def test_install_retries_while_bootout_settles(wsp_home: Path, have_wspd: None) -> None:
+    fake = FakeLaunchctl(loaded=True, fail={"bootstrap": 5})
+    sleeps: list[float] = []
+
+    def settle(delay: float) -> None:  # launchd termina de descargar tras el primer reintento
+        sleeps.append(delay)
+        fake.fail.clear()
+
+    assert daemon_cmd.install(fake, io.StringIO(), settle) == 0
+    assert fake.verbs == ["print", "bootout", "bootstrap", "bootstrap"]
+    assert sleeps == [daemon_cmd.BOOTSTRAP_DELAY]
 
 
 def test_uninstall_removes_plist_keeps_data(wsp_home: Path, have_wspd: None) -> None:

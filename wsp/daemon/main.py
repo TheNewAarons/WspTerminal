@@ -11,6 +11,7 @@ from collections.abc import Callable
 from typing import Any, Final
 
 from wsp import __version__, paths
+from wsp.daemon import media
 from wsp.daemon.config import Config, ConfigError, load_config
 from wsp.daemon.events import Bridge
 from wsp.daemon.logsetup import configure_logging
@@ -110,9 +111,15 @@ async def serve(
         bridge = Bridge(writer, emit)
         names = NameSync(client, writer)
 
+        downloads: set[asyncio.Task[None]] = set()
+
         async def sink(kind: str, ev: Any) -> None:
             await bridge.handle(kind, ev)
-            if kind == "HistorySyncEv":
+            if kind == "MessageEv":  # en segundo plano: no frena la entrega de eventos
+                task = asyncio.create_task(media.save(client.download_media, ev))
+                downloads.add(task)
+                task.add_done_callback(downloads.discard)
+            elif kind == "HistorySyncEv":
                 names.request()
 
         session = Session(client, cfg.reconnect, emit, sink, on_connected=names.request)

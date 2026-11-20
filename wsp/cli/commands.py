@@ -28,13 +28,21 @@ COMMANDS: Final[tuple[tuple[str, str, str], ...]] = (
     ("back", "/back", "cierra el chat abierto"),
     ("r", "/r <n> <texto>", "responde al mensaje n de la vista actual"),
     ("react", "/react <n> <emoji>", "reacciona al mensaje n de la vista actual"),
+    ("oir", "/oir <id>", "reproduce el audio [audio #id] (de nuevo: reinicia)"),
     ("search", "/search <texto>", "busca en todos los chats (luego /open <n> salta al chat)"),
     ("mute", "/mute <chat> <30m|8h|1w|off>", "silencia un chat o quita el silencio"),
     ("history", "/history [n]", "muestra los últimos n mensajes del chat abierto (20)"),
     ("help", "/help", "esta ayuda"),
     ("quit", "/quit", "salir (también Ctrl+D)"),
 )
-_ALIASES: Final = {"exit": "quit", "q": "quit", "h": "help", "?": "help"}
+_ALIASES: Final = {
+    "oír": "oir",
+    "play": "oir",
+    "exit": "quit",
+    "q": "quit",
+    "h": "help",
+    "?": "help",
+}
 
 
 @dataclass(frozen=True)
@@ -67,6 +75,11 @@ class Reply:
 class ReactTo:
     n: int
     emoji: str
+
+
+@dataclass(frozen=True)
+class PlayAudio:
+    audio_id: int
 
 
 @dataclass(frozen=True)
@@ -114,6 +127,7 @@ Parsed = (
     | Back
     | Reply
     | ReactTo
+    | PlayAudio
     | SearchFor
     | MuteChat
     | ShowHistory
@@ -191,6 +205,9 @@ def parse(line: str) -> Parsed:
             if num is None or not emoji or len(emoji) > _EMOJI_MAX or " " in emoji:
                 return Invalid(f"uso: {usage('react')}")
             return ReactTo(num, emoji)
+        case "oir":
+            num = _number(arg.removeprefix("#"))
+            return Invalid(f"uso: {usage('oir')}") if num is None else PlayAudio(num)
         case "mute":
             chat, _, dur = arg.rpartition(" ")
             if not chat.strip():

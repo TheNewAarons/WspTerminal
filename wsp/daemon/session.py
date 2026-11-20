@@ -110,6 +110,9 @@ class WaClient(Protocol):
     async def fetch_names(self) -> list[NameEntry]:
         """Nombres de contactos guardados y de grupos."""
 
+    async def download_media(self, message: Any) -> bytes:
+        """Bytes descifrados del medio de un mensaje (protobuf `Message`)."""
+
 
 def secure_session_files(path: Path | None = None) -> None:
     """Fuerza 600 en la DB de sesión y sus archivos auxiliares (si existen)."""
@@ -405,3 +408,6 @@ class NeonizeClient:
             if jid and name:
                 out.append(NameEntry(jid, name))
         return out
+
+    async def download_media(self, message: Any) -> bytes:
+        return bytes(await self._c.download_any(message))

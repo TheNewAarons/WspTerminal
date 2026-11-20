@@ -38,6 +38,27 @@ def session_path() -> Path:
     return data_dir() / "session.db"
 
 
+def media_dir() -> Path:
+    """Stickers y audios descargados por el daemon."""
+    return data_dir() / "media"
+
+
+def media_file(wa_id: str, ext: str) -> Path:
+    """Ruta del medio de un mensaje; ValueError si el id no es seguro como nombre de archivo."""
+    if not (0 < len(wa_id) <= 128 and wa_id.isascii() and wa_id.isalnum()):
+        raise ValueError("wa_id inválido")
+    return media_dir() / f"{wa_id}.{ext}"
+
+
+def find_media(wa_id: str) -> Path | None:
+    """Archivo descargado de un mensaje (cualquier extensión), o None."""
+    try:
+        stem = media_file(wa_id, "x").with_suffix("")
+    except ValueError:
+        return None
+    return next((p for p in stem.parent.glob(f"{stem.name}.*") if p.suffix != ".part"), None)
+
+
 def socket_path() -> Path:
     return state_dir() / "wspd.sock"
 
