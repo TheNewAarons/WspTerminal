@@ -191,11 +191,13 @@ def _media_prefix(kind: str) -> str:
     return f"[{_MEDIA.get(kind, one_line(kind))}]"
 
 
-def _body(m: MessageNew) -> str:
+def _body(m: MessageNew, audio_id: int | None = None) -> str:
     if m.deleted_at is not None:
         return "(mensaje eliminado)"
     text = sanitize(m.body or "").strip("\n")
     prefix = _media_prefix(m.kind)
+    if audio_id is not None:
+        prefix = f"{prefix[:-1]} #{audio_id}]"  # `[audio #3]`: id para /oir
     return f"{prefix} {text}".strip() if prefix else text
 
 
@@ -221,6 +223,7 @@ def render_message(
     quoted: MessageNew | None = None,
     tz: tzinfo | None = None,
     num: int | None = None,
+    audio_id: int | None = None,
 ) -> list[str]:
     """Líneas de un mensaje. `group_title` no nulo ⇒ `[hh:mm] Grupo / Autor › texto`.
 
@@ -235,7 +238,7 @@ def render_message(
     prefix = f"{pal.dim(str(num).rjust(NUM_WIDTH))} " if num is not None else ""
     head = f"{prefix}{pal.dim(f'[{format_time(m.ts, tz)}]')} {label} {BULLET} "
 
-    lines = _body(m).split("\n")
+    lines = _body(m, audio_id).split("\n")
     tail: list[str] = []
     if m.deleted_at is None and m.edited_at is not None:
         tail.append(pal.dim("(editado)"))
