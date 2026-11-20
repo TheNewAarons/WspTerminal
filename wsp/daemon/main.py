@@ -112,11 +112,18 @@ async def serve(
         names = NameSync(client, writer)
 
         downloads: set[asyncio.Task[None]] = set()
+        media_slots = asyncio.Semaphore(media.CONCURRENCY)
+
+        async def fetch(ev: Any) -> None:
+            async with media_slots:
+                await media.save(client.download_media, ev)
 
         async def sink(kind: str, ev: Any) -> None:
             await bridge.handle(kind, ev)
-            if kind == "MessageEv":  # en segundo plano: no frena la entrega de eventos
-                task = asyncio.create_task(media.save(client.download_media, ev))
+            if kind == "MessageEv" and len(downloads) >= media.MAX_PENDING:
+                log.warning("media: cola llena, descarga descartada")
+            elif kind == "MessageEv":  # en segundo plano: no frena la entrega de eventos
+                task = asyncio.create_task(fetch(ev))
                 downloads.add(task)
                 task.add_done_callback(downloads.discard)
             elif kind == "HistorySyncEv":

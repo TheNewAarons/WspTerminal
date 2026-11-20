@@ -1,5 +1,6 @@
 """Descarga de stickers y audios del daemon."""
 
+import asyncio
 import base64
 import stat
 from pathlib import Path
@@ -43,6 +44,35 @@ async def test_sticker_conversion_failure_leaves_nothing(wsp_home: Path) -> None
     await media.save(_download(), message_ev(ns(stickerMessage=ns()), wa_id="B2"), _fail_convert)
     assert paths.find_media("B2") is None
     assert not any(paths.media_dir().iterdir())
+
+
+async def test_failed_conversion_removes_partial_output(wsp_home: Path) -> None:
+    async def half(src: Path, dst: Path) -> bool:
+        dst.write_bytes(b"medio")  # noqa: ASYNC240
+        return False
+
+    await media.save(_download(), message_ev(ns(stickerMessage=ns()), wa_id="B3"), half)
+    assert not any(paths.media_dir().iterdir())
+
+
+async def test_concurrent_redelivery_downloads_once(wsp_home: Path) -> None:
+    calls = 0
+    gate = asyncio.Event()
+
+    async def slow(_msg: Any) -> bytes:
+        nonlocal calls
+        calls += 1
+        await gate.wait()
+        return b"DATA"
+
+    ev = message_ev(ns(audioMessage=ns()), wa_id="R1")
+    first = asyncio.create_task(media.save(slow, ev))
+    await asyncio.sleep(0)
+    await media.save(slow, ev)  # reentrega mientras la primera sigue en curso
+    gate.set()
+    await first
+    assert calls == 1
+    assert paths.media_file("R1", "ogg").read_bytes() == b"DATA"
 
 
 async def test_audio_extension_from_mimetype(wsp_home: Path) -> None:

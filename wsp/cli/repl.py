@@ -466,7 +466,11 @@ class Repl:
             )
             return
         self._stop_player()
-        self._player = await media.play(path)
+        try:
+            self._player = await media.play(path)
+        except OSError as e:
+            self.error(f"no se pudo reproducir con afplay ({type(e).__name__})")
+            return
         self.note(f"▶ reproduciendo audio #{audio_id}")
 
     def _spawn(self, coro: Awaitable[object]) -> None:
