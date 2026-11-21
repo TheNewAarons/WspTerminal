@@ -100,6 +100,9 @@ class WaClient(Protocol):
         quoted_sender: str | None = None,
         mentions: list[str] | None = None,
     ) -> SendResult: ...
+    async def send_document(
+        self, jid: str, data: bytes, filename: str, caption: str | None = None
+    ) -> SendResult: ...
     async def group_members(self, chat_jid: str) -> list[GroupMember]:
         """Participantes del grupo como (jid, nombre visible si lo hay)."""
 
@@ -361,6 +364,17 @@ class NeonizeClient:
                 ctx.participant = quoted_sender or ""
             msg = Message(extendedTextMessage=ExtendedTextMessage(text=text, contextInfo=ctx))
             resp = await self._c.send_message(target, msg)
+        return SendResult(wa_id=str(resp.ID), ts=norm_ts(resp.Timestamp))
+
+    async def send_document(
+        self, jid: str, data: bytes, filename: str, caption: str | None = None
+    ) -> SendResult:
+        target = self._jid(jid)
+        # bytes, no ruta: neonize descargaría un str con forma de URL.
+        msg = await self._c.build_document_message(
+            data, caption=caption, title=filename, filename=filename
+        )
+        resp = await self._c.send_message(target, msg)
         return SendResult(wa_id=str(resp.ID), ts=norm_ts(resp.Timestamp))
 
     async def group_members(self, chat_jid: str) -> list[GroupMember]:

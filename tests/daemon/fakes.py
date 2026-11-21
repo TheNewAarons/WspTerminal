@@ -76,6 +76,7 @@ class FakeClient:
         self.disconnects = 0
         self.sent: list[tuple[str, str, str | None, str | None]] = []
         self.reactions: list[tuple[str, str, str | None, str]] = []
+        self.documents: list[tuple[str, bytes, str, str | None]] = []
         self.connect_script: list[BaseException | None] = []
         self.after_connect: Callable[[FakeClient], Awaitable[None]] | None = None
         self.send_errors: list[BaseException] = []
@@ -130,6 +131,15 @@ class FakeClient:
     ) -> SendResult:
         self.sent.append((jid, text, quoted_wa_id, quoted_sender))
         self.mentions_sent.append(mentions)
+        if self.send_errors:
+            raise self.send_errors.pop(0)
+        self._n += 1
+        return SendResult(wa_id=f"WA{self._n}", ts=1_700_000_000)
+
+    async def send_document(
+        self, jid: str, data: bytes, filename: str, caption: str | None = None
+    ) -> SendResult:
+        self.documents.append((jid, data, filename, caption))
         if self.send_errors:
             raise self.send_errors.pop(0)
         self._n += 1

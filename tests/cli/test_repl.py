@@ -30,6 +30,7 @@ from wsp.protocol.models import (
     Members,
     MessageNew,
     MessageStatus,
+    SendDocument,
     SendReply,
     SendText,
 )
@@ -506,3 +507,39 @@ async def test_direct_text_has_no_members_query(
     await r.handle_line("/open 1")
     await r.handle_line("mail a@b.com y @x")
     assert not any(isinstance(c, Members) for c in daemon.cmds)
+
+
+async def test_doc_sends_absolute_path(
+    client: Client,
+    out: io.StringIO,
+    daemon: FakeDaemon,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "a.pdf").write_bytes(b"x")
+    monkeypatch.chdir(tmp_path)
+    r = Repl(client, out, Palette(False), tz=UTC)
+    await r.handle_line("/doc a.pdf")  # sin chat abierto: no envía
+    await r.handle_line("/chats")
+    await r.handle_line("/open 1")
+    await r.handle_line("/doc nope.pdf")
+    await r.handle_line("/doc a.pdf hola")
+    [c] = [c for c in daemon.cmds if isinstance(c, SendDocument)]
+    assert (c.path, c.caption) == (str(tmp_path / "a.pdf"), "hola")
+    assert "no existe el archivo: nope.pdf" in out.getvalue()
+
+
+async def test_dropped_files_are_sent_as_documents(
+    client: Client, out: io.StringIO, daemon: FakeDaemon, tmp_path: Path
+) -> None:
+    a, b = tmp_path / "mi a.pdf", tmp_path / "b.txt"
+    a.write_bytes(b"x")
+    b.write_bytes(b"y")
+    r = Repl(client, out, Palette(False), tz=UTC)
+    await r.handle_line("/chats")
+    await r.handle_line("/open 1")
+    await r.handle_line(f"{str(a).replace(' ', chr(92) + ' ')} {b} mira")
+    docs = [c for c in daemon.cmds if isinstance(c, SendDocument)]
+    assert [(c.path, c.caption) for c in docs] == [(str(a), "mira"), (str(b), None)]
+    await r.handle_line(f"{tmp_path}/nope.pdf")
+    assert "no existe el archivo" in out.getvalue()

@@ -1,10 +1,12 @@
 """Outbox (idempotencia, reintentos, token bucket) y Commands."""
 
 import sqlite3
+from pathlib import Path
 
 import pytest
 
 from tests.daemon.fakes import DIRECT_STR, FakeClient, FakeClock
+from wsp.daemon import outbox
 from wsp.daemon.config import OutboxConfig
 from wsp.daemon.outbox import Commands, Outbox, TokenBucket, placeholder_id
 from wsp.protocol.models import (
@@ -17,6 +19,7 @@ from wsp.protocol.models import (
     Mute,
     React,
     Search,
+    SendDocument,
     SendReply,
     SendText,
 )
@@ -314,3 +317,52 @@ async def test_commands_sqlite_error_becomes_internal(
     with pytest.raises(CommandError) as e:
         await rig.commands("1", ListChats(limit=5))
     assert e.value.code == "internal"
+
+
+# ---- documentos ---------------------------------------------------------------------------
+
+
+async def test_document_placeholder_then_sent(rig: Rig, tmp_path: Path) -> None:
+    f = tmp_path / "informe.pdf"
+    f.write_bytes(b"%PDF-1.4")
+    cmd = SendDocument(chat_jid=DIRECT_STR, path=str(f), caption="mira")
+    assert (await rig.commands("r1", cmd))["state"] == "queued"
+    row = rig.message("wsp:r1")
+    assert row is not None and (row.kind, row.body, row.status) == ("document", "mira", "pending")
+    await rig.drain()
+    assert rig.client.documents == [(DIRECT_STR, b"%PDF-1.4", "informe.pdf", "mira")]
+    row = rig.message("WA1")
+    assert row is not None and row.status == "sent"
+
+
+async def test_document_without_caption_shows_filename(rig: Rig, tmp_path: Path) -> None:
+    f = tmp_path / "a.txt"
+    f.write_bytes(b"x")
+    await rig.commands("r1", SendDocument(chat_jid=DIRECT_STR, path=str(f)))
+    row = rig.message("wsp:r1")
+    assert row is not None and row.body == "a.txt"
+
+
+@pytest.mark.parametrize(
+    ("name", "code"), [("nope", "not_found"), ("", "bad_payload"), ("big", "payload_too_big")]
+)
+async def test_document_rejected_before_enqueue(
+    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, code: str
+) -> None:
+    monkeypatch.setattr(outbox, "MAX_DOCUMENT", 3)
+    (tmp_path / "big").write_bytes(b"1234")
+    path = str(tmp_path / name) if name else str(tmp_path)  # "" → directorio
+    with pytest.raises(CommandError) as ei:
+        await rig.commands("r1", SendDocument(chat_jid=DIRECT_STR, path=path))
+    assert ei.value.code == code
+    assert repo.outbox_get(rig.conn, "r1") is None
+
+
+async def test_document_deleted_after_enqueue_fails(rig: Rig, tmp_path: Path) -> None:
+    f = tmp_path / "a.txt"
+    f.write_bytes(b"x")
+    await rig.commands("r1", SendDocument(chat_jid=DIRECT_STR, path=str(f)))
+    f.unlink()
+    await rig.drain()
+    row = rig.message("wsp:r1")
+    assert row is not None and (row.status, row.error) == ("failed", "send_failed")

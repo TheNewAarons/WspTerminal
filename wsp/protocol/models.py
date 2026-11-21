@@ -195,6 +195,13 @@ class SendReply(Payload):
     mentions: Mentions = Field(default_factory=list)
 
 
+class SendDocument(Payload):
+    TYPE: ClassVar[str] = "send_document"
+    chat_jid: Jid
+    path: Annotated[str, StringConstraints(min_length=2, max_length=1024, pattern=r"^/")]
+    caption: Text | None = None
+
+
 class Members(Payload):
     TYPE: ClassVar[str] = "members"
     chat_jid: Jid
@@ -240,7 +247,16 @@ class Ping(Payload):
 
 
 HandledCommand = (
-    SendText | SendReply | React | MarkRead | ListChats | History | Search | Mute | Members
+    SendText
+    | SendReply
+    | SendDocument
+    | React
+    | MarkRead
+    | ListChats
+    | History
+    | Search
+    | Mute
+    | Members
 )
 Command = Hello | Ping | HandledCommand
 
@@ -262,6 +278,7 @@ COMMAND_CLASSES: Final[tuple[type[Command], ...]] = (
     Ping,
     SendText,
     SendReply,
+    SendDocument,
     React,
     MarkRead,
     ListChats,

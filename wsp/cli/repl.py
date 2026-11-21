@@ -40,6 +40,7 @@ from wsp.protocol.models import (
     React,
     Reaction,
     Search,
+    SendDocument,
     SendReply,
     SendText,
 )
@@ -71,6 +72,22 @@ def send_failure(res: Mapping[str, Any] | None) -> str | None:
     if res is not None and res.get("state") == "failed":
         return f"envío fallido: {render.one_line(str(res.get('error', '')))}"
     return None
+
+
+def existing_file(path: str) -> str | None:
+    """Ruta absoluta si es un archivo (el daemon no comparte nuestro cwd); si no, None."""
+    full = os.path.abspath(os.path.expanduser(path))
+    return full if os.path.isfile(full) else None
+
+
+def leading_files(tokens: tuple[str, ...]) -> list[str]:
+    """Prefijo de `tokens` formado por archivos existentes."""
+    out: list[str] = []
+    for t in tokens:
+        if existing_file(t) is None:
+            break
+        out.append(t)
+    return out
 
 
 def parse_rows[M: BaseModel](model: type[M], res: Mapping[str, Any], key: str) -> list[M]:
@@ -354,6 +371,10 @@ class Repl:
                 await self._cmd_reply(cmd)
             case commands.ReactTo():
                 await self._cmd_react(cmd)
+            case commands.SendDoc():
+                await self._cmd_doc(cmd.path, cmd.caption)
+            case commands.DropFiles():
+                await self._cmd_drop(cmd.tokens)
             case commands.PlayAudio():
                 await self._cmd_audio(cmd.audio_id)
             case commands.SearchFor():
@@ -452,6 +473,28 @@ class Repl:
         target = self._target(cmd.n)
         if target is not None:
             await self._call(React(chat_jid=target.chat_jid, wa_id=target.wa_id, emoji=cmd.emoji))
+
+    async def _cmd_doc(self, raw: str, caption: str | None) -> None:
+        if self.open_jid is None:
+            self._emit(*render.HELP_NO_CHAT)
+            return
+        path = await asyncio.to_thread(existing_file, raw)
+        if path is None:
+            self.error(f"no existe el archivo: {render.truncate(raw, 80)}")
+            return
+        self._report_send(
+            await self._call(SendDocument(chat_jid=self.open_jid, path=path, caption=caption))
+        )
+
+    async def _cmd_drop(self, tokens: tuple[str, ...]) -> None:
+        """Archivos arrastrados: las rutas iniciales que existen se envían; el resto es el texto."""
+        files = await asyncio.to_thread(leading_files, tokens)
+        if not files:
+            await self._cmd_doc(tokens[0], None)  # mismo aviso de chat/archivo inexistente
+            return
+        caption = " ".join(tokens[len(files) :]) or None
+        for i, raw in enumerate(files):
+            await self._cmd_doc(raw, caption if i == 0 else None)
 
     async def _cmd_audio(self, audio_id: int) -> None:
         if not 1 <= audio_id <= len(self.audios):

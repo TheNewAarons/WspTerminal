@@ -8,8 +8,10 @@ Los errores se publican como códigos estables, nunca como texto libre.
 
 import asyncio
 import logging
+import os
 import re
 import sqlite3
+import stat
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Final
@@ -30,6 +32,7 @@ from wsp.protocol.models import (
     Mute,
     React,
     Search,
+    SendDocument,
     SendReply,
     SendText,
 )
@@ -46,6 +49,8 @@ ERR_SEND_FAILED: Final = "send_failed"
 ERR_TIMEOUT: Final = "send_timeout"
 ERR_INTERRUPTED: Final = "interrupted"
 SEND_TIMEOUT: Final = 30.0
+DOCUMENT_TIMEOUT: Final = 300.0  # la subida de un documento grande tarda más que un texto
+MAX_DOCUMENT: Final = 100 * 1024 * 1024
 IDLE_POLL: Final = 5.0
 
 Clock = Callable[[], float]
@@ -82,6 +87,33 @@ class TokenBucket:
 
 def placeholder_id(request_id: str) -> str:
     return PLACEHOLDER_PREFIX + request_id
+
+
+def _open_document(path: str) -> tuple[int, int]:
+    """(fd, tamaño) de un archivo regular; O_NONBLOCK evita colgarse en un FIFO."""
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        os.close(fd)
+        raise ValueError("not_regular")
+    if st.st_size > MAX_DOCUMENT:
+        os.close(fd)
+        raise ValueError("too_big")
+    return fd, st.st_size
+
+
+def check_document(path: str) -> None:
+    """Valida antes de encolar; lanza OSError o ValueError("not_regular"|"too_big")."""
+    os.close(_open_document(path)[0])
+
+
+def read_document(path: str) -> bytes:
+    fd, _ = _open_document(path)
+    with os.fdopen(fd, "rb") as f:
+        data = f.read(MAX_DOCUMENT + 1)
+    if len(data) > MAX_DOCUMENT:  # creció entre fstat y read
+        raise ValueError("too_big")
+    return data
 
 
 def _error_code(exc: BaseException) -> str:
@@ -146,16 +178,18 @@ class Outbox:
     def _placeholder(
         self, request_id: str, payload: Mapping[str, Any], chat_jid: str
     ) -> MessageNew | None:
-        """Mensaje `pending` visible de inmediato (solo texto/respuesta; reacciones no)."""
-        if payload["kind"] not in ("text", "reply"):
+        """Mensaje `pending` visible de inmediato (texto, respuesta, documento; reacciones no)."""
+        kind = payload["kind"]
+        if kind not in ("text", "reply", "document"):
             return None
+        doc = kind == "document"
         return MessageNew(
             chat_jid=chat_jid,
             wa_id=placeholder_id(request_id),
             from_me=True,
             ts=self._now(),
-            kind="text",
-            body=payload["text"],
+            kind="document" if doc else "text",
+            body=(payload.get("caption") or payload["filename"]) if doc else payload["text"],
             quoted_wa_id=payload.get("quoted_wa_id"),
             status="pending",
         )
@@ -244,7 +278,8 @@ class Outbox:
         """Envía un elemento: éxito → sent; error → reintento con backoff o failed."""
         await self._bucket.acquire(self._sleep)
         try:
-            res = await asyncio.wait_for(self._send(item), SEND_TIMEOUT)
+            timeout = DOCUMENT_TIMEOUT if item.payload.get("kind") == "document" else SEND_TIMEOUT
+            res = await asyncio.wait_for(self._send(item), timeout)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -265,6 +300,11 @@ class Outbox:
                     p.get("quoted_wa_id"),
                     p.get("quoted_sender"),
                     p.get("mentions") or None,
+                )
+            case "document":
+                data = await asyncio.to_thread(read_document, p["path"])
+                return await self._client.send_document(
+                    item.chat_jid, data, p["filename"], p.get("caption")
                 )
             case "react":
                 return await self._client.send_reaction(
@@ -386,6 +426,16 @@ class Commands:
                 if cmd.mentions:
                     payload["mentions"] = cmd.mentions
                 return await self._outbox.enqueue(rid, payload, cmd.chat_jid)
+            case SendDocument():
+                await _check_document(cmd.path)
+                payload = {
+                    "kind": "document",
+                    "path": cmd.path,
+                    "filename": os.path.basename(cmd.path),
+                }
+                if cmd.caption:
+                    payload["caption"] = cmd.caption
+                return await self._outbox.enqueue(rid, payload, cmd.chat_jid)
             case Members():
                 return await self._members_of(cmd.chat_jid)
             case SendReply():
@@ -413,6 +463,18 @@ class Commands:
                 return await self._outbox.enqueue(rid, payload, cmd.chat_jid)
             case _:
                 return await self._writer.run(_store_command, cmd)
+
+
+async def _check_document(path: str) -> None:
+    """Falla rápido con un código claro; el worker vuelve a leer el archivo al enviar."""
+    try:
+        await asyncio.to_thread(check_document, path)
+    except ValueError as e:
+        if str(e) == "too_big":
+            raise CommandError("payload_too_big", "documento de más de 100 MB") from None
+        raise CommandError("bad_payload", "no es un archivo regular") from None
+    except OSError:
+        raise CommandError("not_found", "no se pudo abrir el archivo") from None
 
 
 def _check_mentions(text: str, mentions: list[str]) -> None:

@@ -1,6 +1,7 @@
 """Parser de comandos del REPL y resolución de chats: funciones puras (sin I/O)."""
 
 import re
+import shlex
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final
@@ -28,6 +29,11 @@ COMMANDS: Final[tuple[tuple[str, str, str], ...]] = (
     ("back", "/back", "cierra el chat abierto"),
     ("r", "/r <n> <texto>", "responde al mensaje n de la vista actual"),
     ("react", "/react <n> <emoji>", "reacciona al mensaje n de la vista actual"),
+    (
+        "doc",
+        "/doc <ruta> [texto]",
+        "envía un archivo como documento (o arrástralo a la terminal y Enter)",
+    ),
     ("oir", "/oir <id>", "reproduce el audio [audio #id] (de nuevo: reinicia)"),
     ("search", "/search <texto>", "busca en todos los chats (luego /open <n> salta al chat)"),
     ("mute", "/mute <chat> <30m|8h|1w|off>", "silencia un chat o quita el silencio"),
@@ -75,6 +81,19 @@ class Reply:
 class ReactTo:
     n: int
     emoji: str
+
+
+@dataclass(frozen=True)
+class SendDoc:
+    path: str
+    caption: str | None
+
+
+@dataclass(frozen=True)
+class DropFiles:
+    """Línea que parece ruta(s) pegada(s) al arrastrar archivos a la terminal."""
+
+    tokens: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -127,6 +146,8 @@ Parsed = (
     | Back
     | Reply
     | ReactTo
+    | SendDoc
+    | DropFiles
     | PlayAudio
     | SearchFor
     | MuteChat
@@ -166,11 +187,24 @@ def _number(token: str) -> int | None:
     return int(token) if token.isascii() and token.isdigit() and 0 < int(token) < 10**6 else None
 
 
+def _dropped(text: str) -> tuple[str, ...] | None:
+    """Tokens si la línea empieza con una ruta (`/a/b`, `~/a`, `'/a b'`); un comando no."""
+    if text[0] not in "/~'\"" or text.startswith("//"):
+        return None
+    try:
+        tokens = shlex.split(text)
+    except ValueError:
+        return None
+    return tuple(tokens) if tokens and "/" in tokens[0].lstrip("/") else None
+
+
 def parse(line: str) -> Parsed:
     """Línea del usuario → comando tipado. Texto sin `/` es `Say`."""
     text = line.strip()
     if not text:
         return Empty()
+    if (tokens := _dropped(text)) is not None:
+        return DropFiles(tokens)
     if not text.startswith("/") or text.startswith("//"):
         return Say(text.removeprefix("/") if text.startswith("//") else text)
     name, _, arg = text[1:].partition(" ")
@@ -205,6 +239,12 @@ def parse(line: str) -> Parsed:
             if num is None or not emoji or len(emoji) > _EMOJI_MAX or " " in emoji:
                 return Invalid(f"uso: {usage('react')}")
             return ReactTo(num, emoji)
+        case "doc":
+            try:  # shlex: acepta comillas y espacios escapados (arrastrar desde Finder)
+                path, *rest = shlex.split(arg)
+            except ValueError:
+                return Invalid(f"uso: {usage('doc')}")
+            return SendDoc(path, " ".join(rest) or None)
         case "oir":
             num = _number(arg.removeprefix("#"))
             return Invalid(f"uso: {usage('oir')}") if num is None else PlayAudio(num)
